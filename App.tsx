@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Plus, 
   ChevronLeft, 
@@ -30,7 +30,11 @@ import {
   ShieldCheck,
   Lock,
   MessageSquare,
-  Key
+  Key,
+  Upload,
+  FileSpreadsheet,
+  Save,
+  Edit3
 } from 'lucide-react';
 import { 
   Transaction, 
@@ -74,14 +78,13 @@ const App: React.FC = () => {
     };
   });
 
-  // Calculate AI Authorization dynamically based on Env Var or User Setting
+  // Calculate AI Authorization
   const isAiAuthorized = useMemo(() => {
     let hasEnv = false;
     try { hasEnv = !!process.env.API_KEY; } catch {}
     return hasEnv || !!settings.apiKey;
   }, [settings.apiKey]);
 
-  // Check if using Env Var specifically (for UI display)
   const isUsingEnvKey = useMemo(() => {
     try { return !!process.env.API_KEY; } catch { return false; }
   }, []);
@@ -115,7 +118,6 @@ const App: React.FC = () => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [showAddModal, setShowAddModal] = useState(false);
   const [showBudgetModal, setShowBudgetModal] = useState(false);
-  const [activeBudgetCategory, setActiveBudgetCategory] = useState<string | null>(null);
   
   const [insights, setInsights] = useState<string>('Analyzing your wealth...');
   const [loadingInsights, setLoadingInsights] = useState(false);
@@ -130,16 +132,20 @@ const App: React.FC = () => {
   const [newType, setNewType] = useState<TransactionType>('expense');
   const [newCategory, setNewCategory] = useState('');
   const [newNote, setNewNote] = useState('');
-  const [showCustomCategoryInput, setShowCustomCategoryInput] = useState(false);
-  const [customCategoryName, setCustomCategoryName] = useState('');
-  const [selectedEmoji, setSelectedEmoji] = useState(COMMON_EMOJIS[0]);
   const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
+
+  // Custom Category Creation State
+  const [isCreatingCategory, setIsCreatingCategory] = useState(false);
+  const [newCustomCategoryName, setNewCustomCategoryName] = useState('');
+  const [newCustomCategoryEmoji, setNewCustomCategoryEmoji] = useState(COMMON_EMOJIS[0]);
+
+  // Budget Editing State
+  const [editingBudgetCategory, setEditingBudgetCategory] = useState<string | null>(null);
+  const [editingBudgetLimit, setEditingBudgetLimit] = useState('');
 
   // Migration State
   const [migrationText, setMigrationText] = useState('');
-  const [isMigrating, setIsMigrating] = useState(false);
-  const [migrationStatus, setMigrationStatus] = useState<MigrationStatus>('idle');
-  const [migrationMessage, setMigrationMessage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- Effects ---
   useEffect(() => {
@@ -158,6 +164,7 @@ const App: React.FC = () => {
     }
   }, [transactions, budgets, currency, isOnboarded, settings, incomeCategories, expenseCategories]);
 
+  // --- Helpers ---
   const getPeriodRange = (date: Date, startDay: number) => {
     const start = new Date(date.getFullYear(), date.getMonth(), startDay);
     if (date.getDate() < startDay) {
@@ -226,6 +233,31 @@ const App: React.FC = () => {
     }, 0);
   }, [transactions]);
 
+  // --- Handlers ---
+
+  const handleCreateCustomCategory = () => {
+    if (!newCustomCategoryName.trim()) return;
+    
+    const newCat: Category = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: newCustomCategoryName.trim(),
+      icon: newCustomCategoryEmoji,
+      color: '#6366f1', // default indigo
+      type: newType
+    };
+
+    if (newType === 'income') {
+      setIncomeCategories([...incomeCategories, newCat]);
+    } else {
+      setExpenseCategories([...expenseCategories, newCat]);
+    }
+
+    setNewCategory(newCat.name);
+    setIsCreatingCategory(false);
+    setNewCustomCategoryName('');
+    setNewCustomCategoryEmoji(COMMON_EMOJIS[0]);
+  };
+
   const handleMagicSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!magicText.trim() || isMagicParsing) return;
@@ -281,6 +313,67 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   };
 
+  const handleDownloadTemplate = () => {
+    const headers = ['Date', 'Type', 'Category', 'Amount', 'Note'];
+    const example = [`${new Date().toISOString().split('T')[0]}`, 'expense', 'Food', '50', 'Lunch'];
+    const csvContent = [headers, example].map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `luxe_ledger_template.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const content = e.target?.result as string;
+      const lines = content.split('\n');
+      const newTransactions: Transaction[] = [];
+
+      // Skip header, start from index 1
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        
+        // Simple CSV parsing (splits by comma)
+        const parts = line.split(',');
+        if (parts.length >= 4) {
+          const [date, type, category, amount, note] = parts;
+          
+          if ((type === 'income' || type === 'expense') && !isNaN(parseFloat(amount))) {
+             newTransactions.push({
+               id: Math.random().toString(36).substr(2, 9),
+               date: date.trim(),
+               type: type as TransactionType,
+               category: category.trim(),
+               amount: parseFloat(amount),
+               note: note ? note.trim() : '',
+               timestamp: new Date(date).getTime()
+             });
+          }
+        }
+      }
+
+      if (newTransactions.length > 0) {
+        setTransactions(prev => [...prev, ...newTransactions]);
+        alert(`Successfully imported ${newTransactions.length} transactions.`);
+      } else {
+        alert('No valid transactions found in file. Please use the template.');
+      }
+    };
+    reader.readAsText(file);
+    // Reset input
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   const handleSaveTransaction = () => {
     if (!newAmount || !newCategory) return;
     
@@ -318,13 +411,27 @@ const App: React.FC = () => {
     setShowAddModal(true);
   };
 
+  const handleSaveBudget = () => {
+    if (!editingBudgetCategory) return;
+    const limit = parseFloat(editingBudgetLimit);
+    
+    if (limit > 0) {
+      setBudgets(prev => {
+        const existing = prev.filter(b => b.categoryName !== editingBudgetCategory);
+        return [...existing, { categoryName: editingBudgetCategory, limit }];
+      });
+    } else {
+      setBudgets(prev => prev.filter(b => b.categoryName !== editingBudgetCategory));
+    }
+    setEditingBudgetCategory(null);
+  };
+
   const resetForm = () => {
     setNewAmount('');
     setNewCategory('');
     setNewNote('');
-    setShowCustomCategoryInput(false);
-    setCustomCategoryName('');
-    setSelectedEmoji(COMMON_EMOJIS[0]);
+    setIsCreatingCategory(false);
+    setNewCustomCategoryName('');
     setEditingTransactionId(null);
   };
 
@@ -348,6 +455,7 @@ const App: React.FC = () => {
   if (!isOnboarded) {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-8 text-center transition-colors">
+        {/* Onboarding UI remains same */}
         <div className="w-24 h-24 bg-indigo-600 rounded-[2.5rem] flex items-center justify-center shadow-2xl mb-8 animate-pulse">
           <Wallet className="text-white" size={48} />
         </div>
@@ -370,6 +478,19 @@ const App: React.FC = () => {
     );
   }
 
+  // Calculate Budget Progress for UI
+  const getBudgetProgress = (catName: string) => {
+    const limit = budgets.find(b => b.categoryName === catName)?.limit || 0;
+    const spent = transactions
+      .filter(t => t.category === catName && t.type === 'expense')
+      .filter(t => {
+        const d = new Date(t.date);
+        return d >= currentPeriod.start && d <= currentPeriod.end;
+      })
+      .reduce((sum, t) => sum + t.amount, 0);
+    return { limit, spent };
+  };
+
   return (
     <div className={`min-h-screen pb-24 flex flex-col max-w-lg mx-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors relative overflow-x-hidden ${settings.theme}`}>
       
@@ -390,6 +511,7 @@ const App: React.FC = () => {
       </header>
 
       <main className="px-6 pt-6 space-y-6 flex-1 overflow-y-auto no-scrollbar">
+        {/* ... Tab Content (Home, Journal, Stats) remains mostly same, just ensuring wrapper consistency ... */}
         
         {/* Tab: Home */}
         {activeTab === 'home' && (
@@ -447,7 +569,7 @@ const App: React.FC = () => {
               </form>
             </div>
 
-            {/* Daily Momentum / Sparkline replacement idea */}
+            {/* Daily Momentum */}
             <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800">
               <div className="flex justify-between items-center mb-6">
                 <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Weekly Velocity</h3>
@@ -522,17 +644,17 @@ const App: React.FC = () => {
 
         {/* Tab: Journal */}
         {activeTab === 'journal' && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
-            <div className="flex flex-col space-y-4">
-              <h3 className="text-2xl font-black tracking-tight px-1">Ledger Journal</h3>
-              <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
-                {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
-                  <button key={p} onClick={() => setJournalPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${journalPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
-                ))}
-              </div>
-            </div>
-            
-            <div className="space-y-4">
+           <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+             <div className="flex flex-col space-y-4">
+               <h3 className="text-2xl font-black tracking-tight px-1">Ledger Journal</h3>
+               <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
+                 {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
+                   <button key={p} onClick={() => setJournalPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${journalPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
+                 ))}
+               </div>
+             </div>
+             {/* Journal list code... reusing same logic as previous */}
+             <div className="space-y-4">
               {journalTransactions.length === 0 ? (
                 <div className="text-center py-24 text-slate-400 space-y-4">
                    <CalendarDays className="mx-auto opacity-10" size={80} />
@@ -575,23 +697,23 @@ const App: React.FC = () => {
                   })}
                 </div>
               )}
-            </div>
-          </div>
+             </div>
+           </div>
         )}
 
         {/* Tab: Stats */}
         {activeTab === 'stats' && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
-            <div className="flex flex-col space-y-4">
-              <h3 className="text-2xl font-black tracking-tight px-1 text-center">Inflow vs Outflow</h3>
-              <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
-                {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
-                  <button key={p} onClick={() => setStatsPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${statsPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4">
+           <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+             <div className="flex flex-col space-y-4">
+               <h3 className="text-2xl font-black tracking-tight px-1 text-center">Inflow vs Outflow</h3>
+               <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
+                 {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
+                   <button key={p} onClick={() => setStatsPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${statsPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
+                 ))}
+               </div>
+             </div>
+             {/* Stats charts code... reusing same logic */}
+             <div className="grid grid-cols-1 gap-4">
               <div className="bg-white dark:bg-slate-900 p-7 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800 flex items-center justify-between">
                 <div>
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Period Volume</p>
@@ -613,7 +735,7 @@ const App: React.FC = () => {
                 <PremiumChart transactions={statsTransactions} type="income" />
               </div>
             </div>
-          </div>
+           </div>
         )}
       </main>
 
@@ -640,232 +762,350 @@ const App: React.FC = () => {
             <PieIcon size={22} strokeWidth={activeTab === 'stats' ? 2.5 : 2} />
             <span className="text-[10px] font-black uppercase tracking-widest">Stats</span>
           </button>
-          <button onClick={() => setShowBudgetModal(true)} className="flex flex-col items-center space-y-1 text-slate-400 hover:text-indigo-500">
+          <button onClick={() => setShowBudgetModal(true)} className="flex flex-col items-center space-y-1 text-slate-400 hover:text-indigo-500 transition-colors">
             <TrendingUp size={22} />
             <span className="text-[10px] font-black uppercase tracking-widest">Limits</span>
           </button>
         </div>
       </nav>
 
-      {/* Settings Panel */}
+      {/* 
+        MODALS - Updated to use max-w-lg mx-auto to stay "inside" the app
+      */}
+
+      {/* Settings Panel - Full Screen */}
       {showSettings && (
-        <div className="fixed inset-0 z-[60] bg-slate-50 dark:bg-slate-950 animate-in slide-in-from-bottom duration-300 overflow-y-auto no-scrollbar">
-          <div className="max-w-lg mx-auto p-8 space-y-8 pb-32">
-            <div className="flex justify-between items-center">
-              <h2 className="text-3xl font-black tracking-tighter">Settings</h2>
-              <button onClick={() => setShowSettings(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
-            </div>
+        <div className="fixed inset-0 z-[60] flex justify-center bg-slate-50 dark:bg-slate-950">
+          <div className="w-full max-w-lg h-full overflow-y-auto no-scrollbar animate-in slide-in-from-bottom duration-300">
+            <div className="p-8 space-y-8 pb-32">
+              <div className="flex justify-between items-center">
+                <h2 className="text-3xl font-black tracking-tighter">Settings</h2>
+                <button onClick={() => setShowSettings(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
+              </div>
 
-            {/* Export Section */}
-            <section className="space-y-4">
-               <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                 <Download size={16} />
-                 <h3 className="text-[10px] font-black uppercase tracking-widest">Data Management</h3>
-               </div>
-               <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                  <button 
-                    onClick={handleExportData}
-                    className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center space-x-2 hover:bg-indigo-500 active:scale-95 transition-all shadow-lg"
-                  >
-                    <Download size={16} />
-                    <span>Download CSV History</span>
-                  </button>
-               </div>
-            </section>
-
-            {/* User Info */}
-            <section className="space-y-4">
-               <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                 <User size={16} />
-                 <h3 className="text-[10px] font-black uppercase tracking-widest">Profile</h3>
-               </div>
-               <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-black uppercase text-slate-400 ml-2">Display Name</label>
-                    <input 
-                      type="text" 
-                      value={settings.userName} 
-                      onChange={(e) => setSettings({...settings, userName: e.target.value})}
-                      className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl px-4 py-3 font-bold"
-                    />
-                  </div>
-               </div>
-            </section>
-
-            {/* AI Setup */}
-            <section className="space-y-4">
-               <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                 <Sparkles size={16} />
-                 <h3 className="text-[10px] font-black uppercase tracking-widest">AI Connection</h3>
-               </div>
-               <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                  <div className="flex items-center justify-between mb-4">
-                     <div className="flex items-center space-x-3">
-                        <div className={`p-2 rounded-xl ${isAiAuthorized ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-400'}`}>
-                           {isAiAuthorized ? <ShieldCheck size={18} /> : <AlertCircle size={18} />}
-                        </div>
-                        <div className="flex flex-col">
-                           <span className="font-bold text-sm">{isAiAuthorized ? 'System Online' : 'Key Missing'}</span>
-                           <span className="text-[10px] text-slate-400">
-                            {isAiAuthorized ? 'AI features enabled' : 'Connect API Key below'}
-                           </span>
-                        </div>
-                     </div>
-                  </div>
-                  
-                  <div className="space-y-2">
-                     {isUsingEnvKey ? (
-                        <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 text-xs font-bold rounded-xl border border-emerald-100 dark:border-emerald-900 flex items-center">
-                          <Lock size={14} className="mr-2"/>
-                          Securely configured via Environment
-                        </div>
-                     ) : (
-                       <>
-                         <div className="relative">
-                            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
-                              <Key size={14} />
-                            </span>
-                            <input 
-                                type="password" 
-                                value={settings.apiKey || ''} 
-                                onChange={(e) => setSettings({...settings, apiKey: e.target.value})}
-                                placeholder="Paste Gemini API Key (AIza...)"
-                                className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl pl-10 pr-4 py-3 font-bold text-xs focus:ring-2 focus:ring-indigo-500"
-                            />
-                         </div>
-                         <p className="text-[9px] text-slate-400 ml-2">
-                           Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:underline">Google AI Studio</a>. Stored locally on your device.
-                         </p>
-                       </>
-                     )}
-                  </div>
-               </div>
-            </section>
-
-            {/* Preferences */}
-            <section className="space-y-4">
-               <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                 <LayoutDashboard size={16} />
-                 <h3 className="text-[10px] font-black uppercase tracking-widest">Preferences</h3>
-               </div>
-               <div className="bg-white dark:bg-slate-900 p-2 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800 divide-y divide-slate-50 dark:divide-slate-800">
-                  <div className="flex items-center justify-between p-4">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-2 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 rounded-xl">
-                        {settings.theme === 'dark' ? <Moon size={18} /> : <Sun size={18} />}
-                      </div>
-                      <span className="font-bold text-sm">Dark Mode</span>
-                    </div>
-                    <button onClick={() => setSettings({...settings, theme: settings.theme === 'light' ? 'dark' : 'light'})} className={`w-12 h-6 rounded-full transition-all relative ${settings.theme === 'dark' ? 'bg-indigo-600' : 'bg-slate-200'}`}>
-                      <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${settings.theme === 'dark' ? 'left-7' : 'left-1'}`}></div>
+              {/* Data Import / Export */}
+              <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
+                   <Database size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Data & Migration</h3>
+                 </div>
+                 <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={handleExportData}
+                      className="bg-white dark:bg-slate-900 p-4 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center space-y-2 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all"
+                    >
+                      <Download size={24} className="text-indigo-600" />
+                      <span className="text-[10px] font-black uppercase tracking-widest">Export CSV</span>
                     </button>
-                  </div>
-                  <div className="flex items-center justify-between p-4">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-2 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 rounded-xl">
-                        <TrendingUp size={18} />
-                      </div>
-                      <span className="font-bold text-sm">Wealth Rollover</span>
-                    </div>
-                    <button onClick={() => setSettings({...settings, enableRollover: !settings.enableRollover})} className={`w-12 h-6 rounded-full transition-all relative ${settings.enableRollover ? 'bg-indigo-600' : 'bg-slate-200'}`}>
-                      <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${settings.enableRollover ? 'left-7' : 'left-1'}`}></div>
+                    
+                    <button 
+                      onClick={handleDownloadTemplate}
+                      className="bg-white dark:bg-slate-900 p-4 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center space-y-2 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all"
+                    >
+                      <FileSpreadsheet size={24} className="text-emerald-500" />
+                      <span className="text-[10px] font-black uppercase tracking-widest">Get Template</span>
                     </button>
-                  </div>
-               </div>
-            </section>
+                 </div>
 
-            {/* Bulk Migration */}
-            <section className="space-y-4">
-               <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                 <Database size={16} />
-                 <h3 className="text-[10px] font-black uppercase tracking-widest">Historical Migration</h3>
-               </div>
-               <div className="bg-white dark:bg-slate-900 p-7 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800 space-y-4">
-                  <textarea 
-                    value={migrationText}
-                    onChange={(e) => setMigrationText(e.target.value)}
-                    placeholder="Paste rows from Excel here..."
-                    className="w-full h-40 bg-slate-50 dark:bg-slate-800 rounded-2xl p-4 text-[11px] font-mono border-none focus:ring-2 focus:ring-indigo-500 text-slate-600 dark:text-slate-300 no-scrollbar resize-none placeholder:opacity-30"
-                  ></textarea>
-                  <button 
-                    onClick={() => {/* logic exists in base but for brevity simplified here */}}
-                    disabled={!migrationText.trim()}
-                    className="w-full bg-slate-900 dark:bg-indigo-600 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center space-x-2 active:scale-95 transition-all"
-                  >
-                    <Database size={16} />
-                    <span>IMPORT HISTORY</span>
-                  </button>
-               </div>
-            </section>
+                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
+                   <div className="text-center space-y-3">
+                     <p className="text-xs font-bold text-slate-500">Restore from CSV</p>
+                     <input 
+                       type="file" 
+                       accept=".csv"
+                       ref={fileInputRef}
+                       onChange={handleFileUpload}
+                       className="hidden"
+                     />
+                     <button 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="w-full bg-slate-900 dark:bg-indigo-600 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center space-x-2 active:scale-95 transition-all"
+                     >
+                       <Upload size={16} />
+                       <span>Upload & Restore</span>
+                     </button>
+                   </div>
+                 </div>
+              </section>
 
-            <div className="text-center pt-8">
-              <p className="text-[9px] font-black text-slate-300 uppercase tracking-widest">Luxe Ledger Platinum Edition</p>
+              {/* User Info */}
+              <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
+                   <User size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Profile</h3>
+                 </div>
+                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-black uppercase text-slate-400 ml-2">Display Name</label>
+                      <input 
+                        type="text" 
+                        value={settings.userName} 
+                        onChange={(e) => setSettings({...settings, userName: e.target.value})}
+                        className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl px-4 py-3 font-bold"
+                      />
+                    </div>
+                 </div>
+              </section>
+
+              {/* AI Setup */}
+              <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
+                   <Sparkles size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">AI Connection</h3>
+                 </div>
+                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center justify-between mb-4">
+                       <div className="flex items-center space-x-3">
+                          <div className={`p-2 rounded-xl ${isAiAuthorized ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-400'}`}>
+                             {isAiAuthorized ? <ShieldCheck size={18} /> : <AlertCircle size={18} />}
+                          </div>
+                          <div className="flex flex-col">
+                             <span className="font-bold text-sm">{isAiAuthorized ? 'System Online' : 'Key Missing'}</span>
+                             <span className="text-[10px] text-slate-400">
+                              {isAiAuthorized ? 'AI features enabled' : 'Connect API Key below'}
+                             </span>
+                          </div>
+                       </div>
+                    </div>
+                    
+                    <div className="space-y-2">
+                       {isUsingEnvKey ? (
+                          <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 text-xs font-bold rounded-xl border border-emerald-100 dark:border-emerald-900 flex items-center">
+                            <Lock size={14} className="mr-2"/>
+                            Securely configured via Environment
+                          </div>
+                       ) : (
+                         <>
+                           <div className="relative">
+                              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
+                                <Key size={14} />
+                              </span>
+                              <input 
+                                  type="password" 
+                                  value={settings.apiKey || ''} 
+                                  onChange={(e) => setSettings({...settings, apiKey: e.target.value})}
+                                  placeholder="Paste Gemini API Key (AIza...)"
+                                  className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl pl-10 pr-4 py-3 font-bold text-xs focus:ring-2 focus:ring-indigo-500"
+                              />
+                           </div>
+                           <p className="text-[9px] text-slate-400 ml-2">
+                             Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:underline">Google AI Studio</a>.
+                           </p>
+                         </>
+                       )}
+                    </div>
+                 </div>
+              </section>
+
+              {/* Preferences */}
+              <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
+                   <LayoutDashboard size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Preferences</h3>
+                 </div>
+                 <div className="bg-white dark:bg-slate-900 p-2 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800 divide-y divide-slate-50 dark:divide-slate-800">
+                    <div className="flex items-center justify-between p-4">
+                      <div className="flex items-center space-x-3">
+                        <div className="p-2 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 rounded-xl">
+                          {settings.theme === 'dark' ? <Moon size={18} /> : <Sun size={18} />}
+                        </div>
+                        <span className="font-bold text-sm">Dark Mode</span>
+                      </div>
+                      <button onClick={() => setSettings({...settings, theme: settings.theme === 'light' ? 'dark' : 'light'})} className={`w-12 h-6 rounded-full transition-all relative ${settings.theme === 'dark' ? 'bg-indigo-600' : 'bg-slate-200'}`}>
+                        <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${settings.theme === 'dark' ? 'left-7' : 'left-1'}`}></div>
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between p-4">
+                      <div className="flex items-center space-x-3">
+                        <div className="p-2 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 rounded-xl">
+                          <TrendingUp size={18} />
+                        </div>
+                        <span className="font-bold text-sm">Wealth Rollover</span>
+                      </div>
+                      <button onClick={() => setSettings({...settings, enableRollover: !settings.enableRollover})} className={`w-12 h-6 rounded-full transition-all relative ${settings.enableRollover ? 'bg-indigo-600' : 'bg-slate-200'}`}>
+                        <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${settings.enableRollover ? 'left-7' : 'left-1'}`}></div>
+                      </button>
+                    </div>
+                 </div>
+              </section>
             </div>
           </div>
         </div>
       )}
 
-      {/* Entry Modal */}
+      {/* Entry Modal - Half Sheet constrained to max-w-lg */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center p-0 bg-slate-900/60 backdrop-blur-md">
-          <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-t-[3.5rem] p-8 space-y-6 shadow-2xl animate-in slide-in-from-bottom duration-300">
-            <div className="flex justify-between items-center">
-              <h2 className="text-xl font-black tracking-tight">{editingTransactionId ? 'Modify Record' : 'New Entry'}</h2>
-              <div className="flex items-center space-x-2">
-                <button onClick={() => { setShowAddModal(false); resetForm(); }} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400"><X size={20}/></button>
-              </div>
-            </div>
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 backdrop-blur-md">
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-t-[3.5rem] p-8 space-y-6 shadow-2xl animate-in slide-in-from-bottom duration-300 relative">
             
-            <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl">
-              <button onClick={() => setNewType('expense')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'expense' ? 'bg-white dark:bg-slate-700 text-rose-600 dark:text-rose-400 shadow-sm' : 'text-slate-400'}`}>Expense</button>
-              <button onClick={() => setNewType('income')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'income' ? 'bg-white dark:bg-slate-700 text-emerald-600 dark:text-emerald-400 shadow-sm' : 'text-slate-400'}`}>Income</button>
-            </div>
+            {/* Custom Category Creation View */}
+            {isCreatingCategory ? (
+              <div className="space-y-6">
+                <div className="flex justify-between items-center">
+                   <h2 className="text-xl font-black tracking-tight">New Category</h2>
+                   <button onClick={() => setIsCreatingCategory(false)} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400"><ChevronLeft size={20}/></button>
+                </div>
+                <div className="space-y-4">
+                   <div>
+                     <label className="text-[10px] font-black uppercase text-slate-400 ml-2">Name</label>
+                     <input 
+                       type="text"
+                       value={newCustomCategoryName}
+                       onChange={(e) => setNewCustomCategoryName(e.target.value)}
+                       placeholder="e.g., Subscriptions"
+                       className="w-full px-6 py-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border-none text-lg font-bold"
+                       autoFocus
+                     />
+                   </div>
+                   <div>
+                     <label className="text-[10px] font-black uppercase text-slate-400 ml-2">Icon</label>
+                     <div className="grid grid-cols-6 gap-2 mt-2 h-40 overflow-y-auto no-scrollbar">
+                       {COMMON_EMOJIS.map(emoji => (
+                         <button 
+                           key={emoji}
+                           onClick={() => setNewCustomCategoryEmoji(emoji)}
+                           className={`aspect-square flex items-center justify-center text-2xl rounded-2xl transition-all ${newCustomCategoryEmoji === emoji ? 'bg-indigo-600 text-white' : 'bg-slate-50 dark:bg-slate-800'}`}
+                         >
+                           {emoji}
+                         </button>
+                       ))}
+                     </div>
+                   </div>
+                   <button 
+                     onClick={handleCreateCustomCategory}
+                     disabled={!newCustomCategoryName.trim()}
+                     className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black text-lg shadow-2xl active:scale-95 disabled:opacity-50 uppercase tracking-widest"
+                   >
+                     Create Category
+                   </button>
+                </div>
+              </div>
+            ) : (
+              /* Standard Entry View */
+              <>
+                <div className="flex justify-between items-center">
+                  <h2 className="text-xl font-black tracking-tight">{editingTransactionId ? 'Modify Record' : 'New Entry'}</h2>
+                  <div className="flex items-center space-x-2">
+                    <button onClick={() => { setShowAddModal(false); resetForm(); }} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400"><X size={20}/></button>
+                  </div>
+                </div>
+                
+                <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl">
+                  <button onClick={() => setNewType('expense')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'expense' ? 'bg-white dark:bg-slate-700 text-rose-600 dark:text-rose-400 shadow-sm' : 'text-slate-400'}`}>Expense</button>
+                  <button onClick={() => setNewType('income')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'income' ? 'bg-white dark:bg-slate-700 text-emerald-600 dark:text-emerald-400 shadow-sm' : 'text-slate-400'}`}>Income</button>
+                </div>
 
-            <div className="relative">
-               <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-black text-2xl">{currency.symbol}</span>
-               <input type="number" placeholder="0" value={newAmount} onChange={(e) => setNewAmount(e.target.value)} className="w-full pl-12 pr-4 py-5 bg-slate-50 dark:bg-slate-800 rounded-3xl border-none focus:ring-2 focus:ring-indigo-500 text-5xl font-black text-slate-800 dark:text-white" autoFocus />
-            </div>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-black text-2xl">{currency.symbol}</span>
+                  <input type="number" placeholder="0" value={newAmount} onChange={(e) => setNewAmount(e.target.value)} className="w-full pl-12 pr-4 py-5 bg-slate-50 dark:bg-slate-800 rounded-3xl border-none focus:ring-2 focus:ring-indigo-500 text-5xl font-black text-slate-800 dark:text-white" autoFocus />
+                </div>
 
-            <div className="grid grid-cols-3 gap-2 overflow-y-auto max-h-40 no-scrollbar py-2">
-              {(newType === 'income' ? incomeCategories : expenseCategories).map(cat => (
-                <button key={cat.id} onClick={() => setNewCategory(cat.name)} className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${newCategory === cat.name ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300' : 'border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-400'}`}>
-                  <span className="text-2xl mb-1">{cat.icon}</span>
-                  <span className="text-[10px] font-black uppercase truncate w-full text-center">{cat.name}</span>
+                <div className="grid grid-cols-3 gap-2 overflow-y-auto max-h-40 no-scrollbar py-2">
+                  {(newType === 'income' ? incomeCategories : expenseCategories).map(cat => (
+                    <button key={cat.id} onClick={() => setNewCategory(cat.name)} className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${newCategory === cat.name ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300' : 'border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-400'}`}>
+                      <span className="text-2xl mb-1">{cat.icon}</span>
+                      <span className="text-[10px] font-black uppercase truncate w-full text-center">{cat.name}</span>
+                    </button>
+                  ))}
+                  {/* Add Custom Category Button */}
+                  <button onClick={() => setIsCreatingCategory(true)} className="flex flex-col items-center justify-center p-3 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all">
+                    <Plus size={24} className="mb-1" />
+                    <span className="text-[10px] font-black uppercase truncate w-full text-center">Add New</span>
+                  </button>
+                </div>
+
+                <input type="text" placeholder="Memo..." value={newNote} onChange={(e) => setNewNote(e.target.value)} className="w-full px-6 py-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border-none text-sm font-medium text-slate-600 dark:text-slate-300" />
+                <button onClick={handleSaveTransaction} disabled={!newAmount || !newCategory} className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black text-lg shadow-2xl active:scale-95 disabled:opacity-50 uppercase tracking-widest">
+                  {editingTransactionId ? 'SYNC CHANGES' : 'POST ENTRY'}
                 </button>
-              ))}
-            </div>
-
-            <input type="text" placeholder="Memo..." value={newNote} onChange={(e) => setNewNote(e.target.value)} className="w-full px-6 py-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border-none text-sm font-medium text-slate-600 dark:text-slate-300" />
-            <button onClick={handleSaveTransaction} disabled={!newAmount || !newCategory} className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black text-lg shadow-2xl active:scale-95 disabled:opacity-50 uppercase tracking-widest">
-              {editingTransactionId ? 'SYNC CHANGES' : 'POST ENTRY'}
-            </button>
+              </>
+            )}
           </div>
         </div>
       )}
 
-      {/* Budget Modal */}
+      {/* Budget Modal - Redesigned to Full Screen inside App */}
       {showBudgetModal && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center p-0 bg-slate-900/60 backdrop-blur-md">
-          <div className="bg-white dark:bg-slate-950 w-full max-w-md rounded-t-[3.5rem] p-8 space-y-6 shadow-2xl overflow-y-auto max-h-[85vh] no-scrollbar animate-in slide-in-from-bottom duration-300">
-            <div className="flex justify-between items-center">
-              <div>
-                <h2 className="text-2xl font-black tracking-tight">Period Caps</h2>
-              </div>
-              <button onClick={() => setShowBudgetModal(false)} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400"><X size={20}/></button>
-            </div>
+        <div className="fixed inset-0 z-[60] flex justify-center bg-slate-50 dark:bg-slate-950">
+          <div className="w-full max-w-lg h-full overflow-y-auto no-scrollbar animate-in slide-in-from-bottom duration-300">
+             <div className="p-6 space-y-6 pb-32">
+                <div className="flex justify-between items-center sticky top-0 bg-slate-50 dark:bg-slate-950 z-10 py-4">
+                  <h2 className="text-3xl font-black tracking-tighter">Budget Limits</h2>
+                  <button onClick={() => setShowBudgetModal(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
+                </div>
 
-            <div className="grid grid-cols-3 gap-3">
-              {expenseCategories.map(cat => {
-                const limit = budgets.find(b => b.categoryName === cat.name)?.limit || 0;
-                return (
-                  <button key={cat.id} className="flex flex-col items-center justify-center p-4 rounded-3xl transition-all border bg-slate-50 dark:bg-slate-900 border-slate-100 dark:border-slate-800 text-slate-400">
-                    <span className="text-2xl mb-1">{cat.icon}</span>
-                    <p className="text-[9px] font-black uppercase truncate w-full text-center">{cat.name}</p>
-                    {limit > 0 && <p className="text-[8px] font-black mt-1 text-indigo-600">{limit}</p>}
-                  </button>
-                );
-              })}
-            </div>
+                <div className="grid grid-cols-1 gap-4">
+                   {expenseCategories.map(cat => {
+                     const { limit, spent } = getBudgetProgress(cat.name);
+                     const percent = limit > 0 ? Math.min((spent / limit) * 100, 100) : 0;
+                     const isEditing = editingBudgetCategory === cat.name;
+
+                     return (
+                       <div key={cat.id} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] shadow-sm border border-slate-100 dark:border-slate-800 relative overflow-hidden">
+                          {/* Progress Background */}
+                          <div 
+                            className="absolute bottom-0 left-0 h-1 bg-indigo-600 transition-all duration-1000" 
+                            style={{ width: `${percent}%`, backgroundColor: percent >= 100 ? '#f43f5e' : '#4f46e5' }}
+                          ></div>
+
+                          <div className="flex justify-between items-start mb-4">
+                            <div className="flex items-center space-x-3">
+                              <div className="text-3xl bg-slate-50 dark:bg-slate-800 w-12 h-12 flex items-center justify-center rounded-2xl">{cat.icon}</div>
+                              <div>
+                                <h3 className="font-bold text-sm">{cat.name}</h3>
+                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
+                                  {limit > 0 ? `${Math.round(percent)}% Used` : 'No Limit Set'}
+                                </p>
+                              </div>
+                            </div>
+                            <button 
+                              onClick={() => {
+                                if (isEditing) handleSaveBudget();
+                                else {
+                                  setEditingBudgetCategory(cat.name);
+                                  setEditingBudgetLimit(limit.toString());
+                                }
+                              }}
+                              className={`p-2 rounded-xl transition-all ${isEditing ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-400'}`}
+                            >
+                              {isEditing ? <CheckCircle2 size={18} /> : <Edit3 size={18} />}
+                            </button>
+                          </div>
+
+                          {isEditing ? (
+                            <div className="animate-in fade-in slide-in-from-top-2">
+                               <div className="relative">
+                                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">{currency.symbol}</span>
+                                  <input 
+                                    type="number" 
+                                    autoFocus
+                                    value={editingBudgetLimit}
+                                    onChange={(e) => setEditingBudgetLimit(e.target.value)}
+                                    placeholder="Set limit"
+                                    className="w-full bg-slate-50 dark:bg-slate-800 pl-10 pr-4 py-3 rounded-xl font-black text-lg"
+                                  />
+                               </div>
+                               <p className="text-[9px] text-slate-400 mt-2 ml-2">Set to 0 to remove limit.</p>
+                            </div>
+                          ) : (
+                            <div className="flex justify-between items-end">
+                              <div>
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Spent</p>
+                                <p className="text-lg font-black">{formatPrice(spent)}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cap</p>
+                                <p className={`text-lg font-black ${limit > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-300'}`}>
+                                  {limit > 0 ? formatPrice(limit) : '∞'}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                       </div>
+                     );
+                   })}
+                </div>
+             </div>
           </div>
         </div>
       )}
