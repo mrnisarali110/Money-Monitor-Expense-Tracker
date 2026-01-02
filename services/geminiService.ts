@@ -4,11 +4,9 @@ import { Transaction, TransactionType } from "../types";
 
 // Safely retrieve the API key prevents crashes in environments where process is undefined
 const getApiKey = () => {
-  try {
-    return process.env.API_KEY;
-  } catch (error) {
-    return undefined;
-  }
+  // Use import.meta.env for Vite and the VITE_ prefix
+  return import.meta.env.VITE_API_KEY;
+};
 };
 
 const API_KEY = getApiKey();
