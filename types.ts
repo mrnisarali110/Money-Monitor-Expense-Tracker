@@ -37,4 +37,5 @@ export interface UserSettings {
   monthStartDay: number;
   enableRollover: boolean;
   stealthMode: boolean;
+  apiKey?: string;
 }

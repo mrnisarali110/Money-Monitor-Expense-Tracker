@@ -29,7 +29,8 @@ import {
   AlertCircle,
   ShieldCheck,
   Lock,
-  MessageSquare
+  MessageSquare,
+  Key
 } from 'lucide-react';
 import { 
   Transaction, 
@@ -61,15 +62,6 @@ const App: React.FC = () => {
   const [journalPeriod, setJournalPeriod] = useState<TimePeriod>('month');
   const [statsPeriod, setStatsPeriod] = useState<TimePeriod>('month');
 
-  // AI Connection State - safely check for env var
-  const [isAiAuthorized] = useState(() => {
-    try {
-      return !!process.env.API_KEY;
-    } catch (e) {
-      return false;
-    }
-  });
-
   const [settings, setSettings] = useState<UserSettings>(() => {
     const saved = localStorage.getItem('userSettings');
     return saved ? JSON.parse(saved) : {
@@ -77,9 +69,22 @@ const App: React.FC = () => {
       theme: 'light',
       monthStartDay: 1,
       enableRollover: true,
-      stealthMode: false
+      stealthMode: false,
+      apiKey: ''
     };
   });
+
+  // Calculate AI Authorization dynamically based on Env Var or User Setting
+  const isAiAuthorized = useMemo(() => {
+    let hasEnv = false;
+    try { hasEnv = !!process.env.API_KEY; } catch {}
+    return hasEnv || !!settings.apiKey;
+  }, [settings.apiKey]);
+
+  // Check if using Env Var specifically (for UI display)
+  const isUsingEnvKey = useMemo(() => {
+    try { return !!process.env.API_KEY; } catch { return false; }
+  }, []);
 
   const [currency, setCurrency] = useState<Currency>(() => {
     const saved = localStorage.getItem('currency');
@@ -226,7 +231,7 @@ const App: React.FC = () => {
     if (!magicText.trim() || isMagicParsing) return;
     
     if (!isAiAuthorized) {
-        alert("Please configure an API Key in your environment variables to use Magic Entry.");
+        alert("Please connect an API Key in Settings to use Magic Entry.");
         return;
     }
 
@@ -694,16 +699,45 @@ const App: React.FC = () => {
                  <h3 className="text-[10px] font-black uppercase tracking-widest">AI Connection</h3>
                </div>
                <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between mb-4">
                      <div className="flex items-center space-x-3">
-                        <div className={`p-2 rounded-xl ${isAiAuthorized ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-400'}`}>
+                        <div className={`p-2 rounded-xl ${isAiAuthorized ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-400'}`}>
                            {isAiAuthorized ? <ShieldCheck size={18} /> : <AlertCircle size={18} />}
                         </div>
                         <div className="flex flex-col">
                            <span className="font-bold text-sm">{isAiAuthorized ? 'System Online' : 'Key Missing'}</span>
-                           {!isAiAuthorized && <span className="text-[10px] text-slate-400">Add API_KEY to Netlify env vars</span>}
+                           <span className="text-[10px] text-slate-400">
+                            {isAiAuthorized ? 'AI features enabled' : 'Connect API Key below'}
+                           </span>
                         </div>
                      </div>
+                  </div>
+                  
+                  <div className="space-y-2">
+                     {isUsingEnvKey ? (
+                        <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 text-xs font-bold rounded-xl border border-emerald-100 dark:border-emerald-900 flex items-center">
+                          <Lock size={14} className="mr-2"/>
+                          Securely configured via Environment
+                        </div>
+                     ) : (
+                       <>
+                         <div className="relative">
+                            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
+                              <Key size={14} />
+                            </span>
+                            <input 
+                                type="password" 
+                                value={settings.apiKey || ''} 
+                                onChange={(e) => setSettings({...settings, apiKey: e.target.value})}
+                                placeholder="Paste Gemini API Key (AIza...)"
+                                className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl pl-10 pr-4 py-3 font-bold text-xs focus:ring-2 focus:ring-indigo-500"
+                            />
+                         </div>
+                         <p className="text-[9px] text-slate-400 ml-2">
+                           Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:underline">Google AI Studio</a>. Stored locally on your device.
+                         </p>
+                       </>
+                     )}
                   </div>
                </div>
             </section>

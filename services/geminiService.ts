@@ -1,21 +1,43 @@
-// Ensure this matches your package.json (usually @google/generative-ai)
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { Transaction } from "../types";
 
-// Vite correctly reads this from Netlify Environment Variables
-const API_KEY = import.meta.env.VITE_API_KEY;
+import { GoogleGenAI, Type } from "@google/genai";
+import { Transaction, TransactionType } from "../types";
+
+// Dynamic API Key retrieval: Checks Environment -> then LocalStorage
+const getApiKey = () => {
+  // 1. Check Environment Variable (Netlify/Build time)
+  try {
+    if (process.env.API_KEY) {
+      return process.env.API_KEY;
+    }
+  } catch (error) {
+    // process is not defined
+  }
+
+  // 2. Check User Settings in LocalStorage (Runtime user input)
+  try {
+    const savedSettings = localStorage.getItem('userSettings');
+    if (savedSettings) {
+      const parsed = JSON.parse(savedSettings);
+      if (parsed.apiKey) return parsed.apiKey;
+    }
+  } catch (error) {
+    // localStorage error
+  }
+
+  return undefined;
+};
 
 export const getFinancialInsights = async (transactions: Transaction[], monthName: string) => {
   if (transactions.length === 0) return "Add some transactions to see smart insights!";
 
-  if (!API_KEY) {
-    return "Connect an API Key in Netlify settings to enable smart financial insights.";
+  const apiKey = getApiKey();
+
+  // Gracefully handle missing API key
+  if (!apiKey) {
+    return "Connect an API Key in settings to enable smart financial insights.";
   }
 
-  // Use the correct Class Name from the SDK
-  const genAI = new GoogleGenerativeAI(API_KEY);
-  // Change to a stable model name
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const ai = new GoogleGenAI({ apiKey });
 
   const summary = transactions.reduce((acc, t) => {
     if (t.type === 'income') acc.income += t.amount;
@@ -34,11 +56,60 @@ export const getFinancialInsights = async (transactions: Transaction[], monthNam
   `;
 
   try {
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text() || "Keep tracking to optimize your wealth.";
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+    });
+    return response.text || "Keep tracking to optimize your wealth.";
   } catch (error: any) {
     console.error("Gemini Error:", error);
-    return "Your financial journey is looking solid. Keep it up!";
+    return "Unable to generate insights. Please check your API Key.";
+  }
+};
+
+export const parseNaturalLanguageTransaction = async (text: string, categories: {income: string[], expense: string[]}) => {
+  const apiKey = getApiKey();
+
+  // Gracefully handle missing API key
+  if (!apiKey) {
+    console.warn("Magic Entry requires an API Key.");
+    return null;
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+  
+  const prompt = `
+    Extract transaction details from this text: "${text}"
+    Available Income Categories: ${categories.income.join(', ')}
+    Available Expense Categories: ${categories.expense.join(', ')}
+    
+    If the category doesn't perfectly match, pick the closest one from the list.
+    If it's clearly income (received, salary, bonus), set type to 'income'. Otherwise 'expense'.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            amount: { type: Type.NUMBER },
+            type: { type: Type.STRING, description: "'income' or 'expense'" },
+            category: { type: Type.STRING },
+            note: { type: Type.STRING },
+          },
+          required: ["amount", "type", "category"]
+        }
+      }
+    });
+
+    const result = JSON.parse(response.text || '{}');
+    return result;
+  } catch (error) {
+    console.error("Parsing Error:", error);
+    return null;
   }
 };
