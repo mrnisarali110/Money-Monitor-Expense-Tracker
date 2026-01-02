@@ -6,7 +6,7 @@ import { Transaction, TransactionType } from "../types";
 const getApiKey = () => {
   // Use import.meta.env for Vite and the VITE_ prefix
   return import.meta.env.VITE_API_KEY;
-};
+
 };
 
 const API_KEY = getApiKey();
