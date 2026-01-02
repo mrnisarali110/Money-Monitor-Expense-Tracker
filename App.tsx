@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   Plus, 
   ChevronLeft, 
@@ -34,7 +34,13 @@ import {
   Upload,
   FileSpreadsheet,
   Save,
-  Edit3
+  Edit3,
+  LogOut,
+  ArrowRight,
+  Cloud,
+  CloudLightning,
+  Loader2,
+  RefreshCw
 } from 'lucide-react';
 import { 
   Transaction, 
@@ -53,10 +59,23 @@ import {
 } from './constants';
 import { PremiumChart } from './components/PremiumChart';
 import { getFinancialInsights, parseNaturalLanguageTransaction } from './services/geminiService';
+import { findAppDataFile, downloadAppData, createAppDataFile, updateAppDataFile } from './services/driveService';
+
+// Fix for window.google TS error
+declare global {
+  interface Window {
+    google: any;
+  }
+}
+
+// --- CONFIGURATION ---
+// User provided Client ID. 
+// NOTE: Client Secret is NOT used in frontend applications for security reasons.
+// Added .trim() to ensure no accidental whitespace causes errors.
+const GOOGLE_CLIENT_ID = '122158674616-928aopvfdh0ckll166gkm7gdu89suoel.apps.googleusercontent.com'.trim();
 
 type TabType = 'home' | 'journal' | 'stats';
 type TimePeriod = 'day' | 'week' | 'month' | 'year';
-type MigrationStatus = 'idle' | 'success' | 'error';
 
 const App: React.FC = () => {
   // --- Persistent State ---
@@ -80,12 +99,6 @@ const App: React.FC = () => {
 
   // Calculate AI Authorization
   const isAiAuthorized = useMemo(() => {
-    let hasEnv = false;
-    try { hasEnv = !!process.env.API_KEY; } catch {}
-    return hasEnv || !!settings.apiKey;
-  }, [settings.apiKey]);
-
-  const isUsingEnvKey = useMemo(() => {
     try { return !!process.env.API_KEY; } catch { return false; }
   }, []);
 
@@ -113,6 +126,13 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('expenseCategories');
     return saved ? JSON.parse(saved) : INITIAL_EXPENSE_CATEGORIES;
   });
+
+  // --- Google Drive Sync State ---
+  const [userToken, setUserToken] = useState<string | null>(null);
+  const [driveFileId, setDriveFileId] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncTime, setLastSyncTime] = useState<number | null>(null);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
 
   // --- UI & Utility State ---
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -144,7 +164,6 @@ const App: React.FC = () => {
   const [editingBudgetLimit, setEditingBudgetLimit] = useState('');
 
   // Migration State
-  const [migrationText, setMigrationText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- Effects ---
@@ -163,6 +182,112 @@ const App: React.FC = () => {
       document.documentElement.classList.remove('dark');
     }
   }, [transactions, budgets, currency, isOnboarded, settings, incomeCategories, expenseCategories]);
+
+  // --- GOOGLE SYNC LOGIC ---
+
+  // Auto-save to Drive when data changes (debounced)
+  useEffect(() => {
+    if (!userToken || !driveFileId || syncStatus === 'syncing') return;
+
+    const saveData = async () => {
+      setSyncStatus('syncing');
+      try {
+        const payload = {
+            version: 1,
+            timestamp: Date.now(),
+            settings,
+            currency,
+            transactions,
+            budgets,
+            incomeCategories,
+            expenseCategories
+        };
+        await updateAppDataFile(userToken, driveFileId, payload);
+        setSyncStatus('success');
+        setLastSyncTime(Date.now());
+        setTimeout(() => setSyncStatus('idle'), 2000);
+      } catch (e) {
+        console.error("Auto-save failed", e);
+        setSyncStatus('error');
+      }
+    };
+
+    const timer = setTimeout(saveData, 3000); // 3-second debounce
+    return () => clearTimeout(timer);
+  }, [transactions, budgets, settings, currency, incomeCategories, expenseCategories, userToken, driveFileId]);
+
+
+  const handleGoogleLogin = () => {
+    if (!window.google) {
+      alert("Google Identity Services not loaded. Please refresh the page.");
+      return;
+    }
+
+    try {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        callback: async (response: any) => {
+          if (response.access_token) {
+            setUserToken(response.access_token);
+            setIsSyncing(true);
+            setSyncStatus('syncing');
+            try {
+               // 1. Look for existing file
+               const existingFile = await findAppDataFile(response.access_token);
+               
+               if (existingFile) {
+                 // 2a. Found: Download and merge
+                 setDriveFileId(existingFile.id);
+                 const cloudData = await downloadAppData(response.access_token, existingFile.id);
+                 
+                 if (cloudData) {
+                    // Merge logic: Prioritize Cloud if it exists.
+                    if (confirm("Found backup in Google Drive. Load it? This will overwrite local changes made since last sync.")) {
+                        if (cloudData.transactions) setTransactions(cloudData.transactions);
+                        if (cloudData.budgets) setBudgets(cloudData.budgets);
+                        if (cloudData.settings) setSettings(cloudData.settings);
+                        if (cloudData.currency) setCurrency(cloudData.currency);
+                        if (cloudData.incomeCategories) setIncomeCategories(cloudData.incomeCategories);
+                        if (cloudData.expenseCategories) setExpenseCategories(cloudData.expenseCategories);
+                    }
+                 }
+               } else {
+                 // 2b. Not Found: Create new file with current local data
+                 const payload = {
+                   version: 1,
+                   timestamp: Date.now(),
+                   settings,
+                   currency,
+                   transactions,
+                   budgets,
+                   incomeCategories,
+                   expenseCategories
+                 };
+                 const newFile = await createAppDataFile(response.access_token, payload);
+                 setDriveFileId(newFile.id);
+               }
+               setSyncStatus('success');
+               setLastSyncTime(Date.now());
+            } catch (error) {
+              console.error("Sync init failed", error);
+              setSyncStatus('error');
+              alert("Failed to sync with Drive. Please check your network or try again.");
+            } finally {
+              setIsSyncing(false);
+            }
+          } else if (response.error) {
+             console.error("Google Auth Error:", response);
+             alert(`Google Login Failed: ${response.error_description || response.error}`);
+          }
+        },
+      });
+      client.requestAccessToken();
+    } catch (e: any) {
+        console.error("Token Client Init Error", e);
+        alert(`Could not initialize Google Login: ${e.message}`);
+    }
+  };
 
   // --- Helpers ---
   const getPeriodRange = (date: Date, startDay: number) => {
@@ -234,7 +359,6 @@ const App: React.FC = () => {
   }, [transactions]);
 
   // --- Handlers ---
-
   const handleCreateCustomCategory = () => {
     if (!newCustomCategoryName.trim()) return;
     
@@ -261,12 +385,10 @@ const App: React.FC = () => {
   const handleMagicSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!magicText.trim() || isMagicParsing) return;
-    
     if (!isAiAuthorized) {
-        alert("Please connect an API Key in Settings to use Magic Entry.");
+        alert("API Key is missing in environment variables.");
         return;
     }
-
     setIsMagicParsing(true);
     const parsed = await parseNaturalLanguageTransaction(magicText, {
       income: incomeCategories.map(c => c.name),
@@ -300,13 +422,12 @@ const App: React.FC = () => {
       t.amount.toString(),
       t.note || ''
     ]);
-
     const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
     link.setAttribute("href", url);
-    link.setAttribute("download", `luxe_ledger_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute("download", `luxe_ledger_export.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -331,23 +452,17 @@ const App: React.FC = () => {
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = (e) => {
       const content = e.target?.result as string;
       const lines = content.split('\n');
       const newTransactions: Transaction[] = [];
-
-      // Skip header, start from index 1
       for (let i = 1; i < lines.length; i++) {
         const line = lines[i].trim();
         if (!line) continue;
-        
-        // Simple CSV parsing (splits by comma)
         const parts = line.split(',');
         if (parts.length >= 4) {
           const [date, type, category, amount, note] = parts;
-          
           if ((type === 'income' || type === 'expense') && !isNaN(parseFloat(amount))) {
              newTransactions.push({
                id: Math.random().toString(36).substr(2, 9),
@@ -361,7 +476,6 @@ const App: React.FC = () => {
           }
         }
       }
-
       if (newTransactions.length > 0) {
         setTransactions(prev => [...prev, ...newTransactions]);
         alert(`Successfully imported ${newTransactions.length} transactions.`);
@@ -370,13 +484,11 @@ const App: React.FC = () => {
       }
     };
     reader.readAsText(file);
-    // Reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleSaveTransaction = () => {
     if (!newAmount || !newCategory) return;
-    
     if (editingTransactionId) {
       setTransactions(prev => prev.map(t => t.id === editingTransactionId ? {
         ...t,
@@ -397,7 +509,6 @@ const App: React.FC = () => {
       };
       setTransactions(prev => [transaction, ...prev]);
     }
-    
     setShowAddModal(false);
     resetForm();
   };
@@ -414,7 +525,6 @@ const App: React.FC = () => {
   const handleSaveBudget = () => {
     if (!editingBudgetCategory) return;
     const limit = parseFloat(editingBudgetLimit);
-    
     if (limit > 0) {
       setBudgets(prev => {
         const existing = prev.filter(b => b.categoryName !== editingBudgetCategory);
@@ -452,10 +562,21 @@ const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [transactions.length, isAiAuthorized, isOnboarded]);
 
+  const getBudgetProgress = (catName: string) => {
+    const limit = budgets.find(b => b.categoryName === catName)?.limit || 0;
+    const spent = transactions
+      .filter(t => t.category === catName && t.type === 'expense')
+      .filter(t => {
+        const d = new Date(t.date);
+        return d >= currentPeriod.start && d <= currentPeriod.end;
+      })
+      .reduce((sum, t) => sum + t.amount, 0);
+    return { limit, spent };
+  };
+
   if (!isOnboarded) {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-8 text-center transition-colors">
-        {/* Onboarding UI remains same */}
         <div className="w-24 h-24 bg-indigo-600 rounded-[2.5rem] flex items-center justify-center shadow-2xl mb-8 animate-pulse">
           <Wallet className="text-white" size={48} />
         </div>
@@ -478,22 +599,8 @@ const App: React.FC = () => {
     );
   }
 
-  // Calculate Budget Progress for UI
-  const getBudgetProgress = (catName: string) => {
-    const limit = budgets.find(b => b.categoryName === catName)?.limit || 0;
-    const spent = transactions
-      .filter(t => t.category === catName && t.type === 'expense')
-      .filter(t => {
-        const d = new Date(t.date);
-        return d >= currentPeriod.start && d <= currentPeriod.end;
-      })
-      .reduce((sum, t) => sum + t.amount, 0);
-    return { limit, spent };
-  };
-
   return (
     <div className={`min-h-screen pb-24 flex flex-col max-w-lg mx-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors relative overflow-x-hidden ${settings.theme}`}>
-      
       {/* Header */}
       <header className="sticky top-0 z-20 glass dark:bg-slate-900/80 px-6 py-4 flex items-center justify-between premium-shadow">
         <div className="flex items-center space-x-2">
@@ -506,17 +613,29 @@ const App: React.FC = () => {
             <span className="text-[9px] font-black w-24 text-center uppercase tracking-widest truncate">{MONTHS[currentDate.getMonth()]} '{currentDate.getFullYear().toString().slice(-2)}</span>
             <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth()+1)))} className="p-1"><ChevronRight size={16} /></button>
           </div>
-          <button onClick={() => setShowSettings(true)} className="text-slate-400 hover:text-indigo-600 transition-colors p-1"><SettingsIcon size={22}/></button>
+          <button onClick={() => setShowSettings(true)} className="text-slate-400 hover:text-indigo-600 transition-colors p-1 relative">
+            <SettingsIcon size={22}/>
+            {syncStatus === 'error' && <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full"></span>}
+          </button>
         </div>
       </header>
 
       <main className="px-6 pt-6 space-y-6 flex-1 overflow-y-auto no-scrollbar">
-        {/* ... Tab Content (Home, Journal, Stats) remains mostly same, just ensuring wrapper consistency ... */}
-        
-        {/* Tab: Home */}
+        {/* SYNC STATUS BANNER (Only if connected) */}
+        {userToken && (
+            <div className={`flex items-center justify-between px-4 py-2 rounded-2xl text-[10px] font-bold uppercase tracking-widest transition-all ${syncStatus === 'error' ? 'bg-red-50 text-red-600' : 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600'}`}>
+               <div className="flex items-center space-x-2">
+                  {syncStatus === 'syncing' ? <RefreshCw size={12} className="animate-spin" /> : <CloudLightning size={12} />}
+                  <span>{syncStatus === 'syncing' ? 'Syncing...' : syncStatus === 'error' ? 'Sync Error' : 'Drive Connected'}</span>
+               </div>
+               {lastSyncTime && syncStatus !== 'syncing' && (
+                   <span className="opacity-50">{new Date(lastSyncTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+               )}
+            </div>
+        )}
+
         {activeTab === 'home' && (
           <div className="space-y-6 animate-in fade-in duration-500 pb-12">
-            
             {/* Balance Card */}
             <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-[2.5rem] p-8 text-white premium-shadow relative overflow-hidden group">
               <div className="absolute top-[-20%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl group-hover:bg-indigo-500/30 transition-all"></div>
@@ -642,7 +761,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* Tab: Journal */}
+        {/* Tab: Journal (Existing Code Structure Preserved) */}
         {activeTab === 'journal' && (
            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
              <div className="flex flex-col space-y-4">
@@ -653,7 +772,6 @@ const App: React.FC = () => {
                  ))}
                </div>
              </div>
-             {/* Journal list code... reusing same logic as previous */}
              <div className="space-y-4">
               {journalTransactions.length === 0 ? (
                 <div className="text-center py-24 text-slate-400 space-y-4">
@@ -701,7 +819,7 @@ const App: React.FC = () => {
            </div>
         )}
 
-        {/* Tab: Stats */}
+        {/* Tab: Stats (Existing Code Structure Preserved) */}
         {activeTab === 'stats' && (
            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
              <div className="flex flex-col space-y-4">
@@ -712,7 +830,6 @@ const App: React.FC = () => {
                  ))}
                </div>
              </div>
-             {/* Stats charts code... reusing same logic */}
              <div className="grid grid-cols-1 gap-4">
               <div className="bg-white dark:bg-slate-900 p-7 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800 flex items-center justify-between">
                 <div>
@@ -769,11 +886,7 @@ const App: React.FC = () => {
         </div>
       </nav>
 
-      {/* 
-        MODALS - Updated to use max-w-lg mx-auto to stay "inside" the app
-      */}
-
-      {/* Settings Panel - Full Screen */}
+      {/* Settings Panel */}
       {showSettings && (
         <div className="fixed inset-0 z-[60] flex justify-center bg-slate-50 dark:bg-slate-950">
           <div className="w-full max-w-lg h-full overflow-y-auto no-scrollbar animate-in slide-in-from-bottom duration-300">
@@ -782,6 +895,51 @@ const App: React.FC = () => {
                 <h2 className="text-3xl font-black tracking-tighter">Settings</h2>
                 <button onClick={() => setShowSettings(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
               </div>
+
+              {/* Cloud Sync Section - Google Drive */}
+              <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
+                   <Cloud size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Cloud Sync</h3>
+                 </div>
+                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
+                    {userToken ? (
+                        <div className="space-y-4">
+                            <div className="flex items-center space-x-3 text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 p-4 rounded-2xl">
+                                <CheckCircle2 size={24} />
+                                <div>
+                                    <p className="font-bold text-sm">Synced with Drive</p>
+                                    <p className="text-[10px] opacity-70">Data is automatically backed up.</p>
+                                </div>
+                            </div>
+                            <button 
+                                onClick={() => {
+                                    if(confirm("Log out of Drive? Local data will remain.")) {
+                                        setUserToken(null);
+                                        setDriveFileId(null);
+                                    }
+                                }}
+                                className="w-full py-3 bg-slate-100 dark:bg-slate-800 text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                            >
+                                Disconnect
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+                            <p className="text-xs font-medium text-slate-500 leading-relaxed">
+                                Connect Google Drive to sync your financial data across devices for free.
+                            </p>
+                            <button 
+                                onClick={handleGoogleLogin}
+                                className="w-full bg-slate-900 dark:bg-white dark:text-slate-900 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center space-x-2 shadow-lg active:scale-95 transition-all"
+                            >
+                                <CloudLightning size={16} />
+                                <span>Connect Google Drive</span>
+                            </button>
+                        </div>
+                    )}
+                 </div>
+              </section>
 
               {/* Data Import / Export */}
               <section className="space-y-4">
@@ -847,56 +1005,6 @@ const App: React.FC = () => {
                  </div>
               </section>
 
-              {/* AI Setup */}
-              <section className="space-y-4">
-                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                   <Sparkles size={16} />
-                   <h3 className="text-[10px] font-black uppercase tracking-widest">AI Connection</h3>
-                 </div>
-                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                    <div className="flex items-center justify-between mb-4">
-                       <div className="flex items-center space-x-3">
-                          <div className={`p-2 rounded-xl ${isAiAuthorized ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-400'}`}>
-                             {isAiAuthorized ? <ShieldCheck size={18} /> : <AlertCircle size={18} />}
-                          </div>
-                          <div className="flex flex-col">
-                             <span className="font-bold text-sm">{isAiAuthorized ? 'System Online' : 'Key Missing'}</span>
-                             <span className="text-[10px] text-slate-400">
-                              {isAiAuthorized ? 'AI features enabled' : 'Connect API Key below'}
-                             </span>
-                          </div>
-                       </div>
-                    </div>
-                    
-                    <div className="space-y-2">
-                       {isUsingEnvKey ? (
-                          <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 text-xs font-bold rounded-xl border border-emerald-100 dark:border-emerald-900 flex items-center">
-                            <Lock size={14} className="mr-2"/>
-                            Securely configured via Environment
-                          </div>
-                       ) : (
-                         <>
-                           <div className="relative">
-                              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
-                                <Key size={14} />
-                              </span>
-                              <input 
-                                  type="password" 
-                                  value={settings.apiKey || ''} 
-                                  onChange={(e) => setSettings({...settings, apiKey: e.target.value})}
-                                  placeholder="Paste Gemini API Key (AIza...)"
-                                  className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl pl-10 pr-4 py-3 font-bold text-xs focus:ring-2 focus:ring-indigo-500"
-                              />
-                           </div>
-                           <p className="text-[9px] text-slate-400 ml-2">
-                             Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:underline">Google AI Studio</a>.
-                           </p>
-                         </>
-                       )}
-                    </div>
-                 </div>
-              </section>
-
               {/* Preferences */}
               <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-slate-400 mb-2">
@@ -933,12 +1041,10 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Entry Modal - Half Sheet constrained to max-w-lg */}
+      {/* Entry Modal */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 backdrop-blur-md">
           <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-t-[3.5rem] p-8 space-y-6 shadow-2xl animate-in slide-in-from-bottom duration-300 relative">
-            
-            {/* Custom Category Creation View */}
             {isCreatingCategory ? (
               <div className="space-y-6">
                 <div className="flex justify-between items-center">
@@ -981,7 +1087,6 @@ const App: React.FC = () => {
                 </div>
               </div>
             ) : (
-              /* Standard Entry View */
               <>
                 <div className="flex justify-between items-center">
                   <h2 className="text-xl font-black tracking-tight">{editingTransactionId ? 'Modify Record' : 'New Entry'}</h2>
@@ -1007,7 +1112,6 @@ const App: React.FC = () => {
                       <span className="text-[10px] font-black uppercase truncate w-full text-center">{cat.name}</span>
                     </button>
                   ))}
-                  {/* Add Custom Category Button */}
                   <button onClick={() => setIsCreatingCategory(true)} className="flex flex-col items-center justify-center p-3 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all">
                     <Plus size={24} className="mb-1" />
                     <span className="text-[10px] font-black uppercase truncate w-full text-center">Add New</span>
@@ -1024,7 +1128,7 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Budget Modal - Redesigned to Full Screen inside App */}
+      {/* Budget Modal */}
       {showBudgetModal && (
         <div className="fixed inset-0 z-[60] flex justify-center bg-slate-50 dark:bg-slate-950">
           <div className="w-full max-w-lg h-full overflow-y-auto no-scrollbar animate-in slide-in-from-bottom duration-300">
@@ -1042,7 +1146,6 @@ const App: React.FC = () => {
 
                      return (
                        <div key={cat.id} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] shadow-sm border border-slate-100 dark:border-slate-800 relative overflow-hidden">
-                          {/* Progress Background */}
                           <div 
                             className="absolute bottom-0 left-0 h-1 bg-indigo-600 transition-all duration-1000" 
                             style={{ width: `${percent}%`, backgroundColor: percent >= 100 ? '#f43f5e' : '#4f46e5' }}

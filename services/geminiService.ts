@@ -2,42 +2,15 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Transaction, TransactionType } from "../types";
 
-// Dynamic API Key retrieval: Checks Environment -> then LocalStorage
-const getApiKey = () => {
-  // 1. Check Environment Variable (Netlify/Build time)
-  try {
-    if (process.env.API_KEY) {
-      return process.env.API_KEY;
-    }
-  } catch (error) {
-    // process is not defined
-  }
-
-  // 2. Check User Settings in LocalStorage (Runtime user input)
-  try {
-    const savedSettings = localStorage.getItem('userSettings');
-    if (savedSettings) {
-      const parsed = JSON.parse(savedSettings);
-      if (parsed.apiKey) return parsed.apiKey;
-    }
-  } catch (error) {
-    // localStorage error
-  }
-
-  return undefined;
-};
-
 export const getFinancialInsights = async (transactions: Transaction[], monthName: string) => {
   if (transactions.length === 0) return "Add some transactions to see smart insights!";
 
-  const apiKey = getApiKey();
-
   // Gracefully handle missing API key
-  if (!apiKey) {
-    return "Connect an API Key in settings to enable smart financial insights.";
+  if (!process.env.API_KEY) {
+    return "API Key not configured in environment variables.";
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
   const summary = transactions.reduce((acc, t) => {
     if (t.type === 'income') acc.income += t.amount;
@@ -63,20 +36,18 @@ export const getFinancialInsights = async (transactions: Transaction[], monthNam
     return response.text || "Keep tracking to optimize your wealth.";
   } catch (error: any) {
     console.error("Gemini Error:", error);
-    return "Unable to generate insights. Please check your API Key.";
+    return "Unable to generate insights. Please check your API Key configuration.";
   }
 };
 
 export const parseNaturalLanguageTransaction = async (text: string, categories: {income: string[], expense: string[]}) => {
-  const apiKey = getApiKey();
-
   // Gracefully handle missing API key
-  if (!apiKey) {
+  if (!process.env.API_KEY) {
     console.warn("Magic Entry requires an API Key.");
     return null;
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   const prompt = `
     Extract transaction details from this text: "${text}"
