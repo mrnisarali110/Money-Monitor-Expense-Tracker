@@ -2,8 +2,16 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Transaction, TransactionType } from "../types";
 
-// Safely retrieve the API key if it exists in the build environment
-const API_KEY = process.env.API_KEY;
+// Safely retrieve the API key prevents crashes in environments where process is undefined
+const getApiKey = () => {
+  try {
+    return process.env.API_KEY;
+  } catch (error) {
+    return undefined;
+  }
+};
+
+const API_KEY = getApiKey();
 
 export const getFinancialInsights = async (transactions: Transaction[], monthName: string) => {
   if (transactions.length === 0) return "Add some transactions to see smart insights!";

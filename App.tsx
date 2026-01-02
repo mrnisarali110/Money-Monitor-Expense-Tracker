@@ -61,8 +61,14 @@ const App: React.FC = () => {
   const [journalPeriod, setJournalPeriod] = useState<TimePeriod>('month');
   const [statsPeriod, setStatsPeriod] = useState<TimePeriod>('month');
 
-  // AI Connection State - purely based on environment variable existence for deployment safety
-  const [isAiAuthorized] = useState(!!process.env.API_KEY);
+  // AI Connection State - safely check for env var
+  const [isAiAuthorized] = useState(() => {
+    try {
+      return !!process.env.API_KEY;
+    } catch (e) {
+      return false;
+    }
+  });
 
   const [settings, setSettings] = useState<UserSettings>(() => {
     const saved = localStorage.getItem('userSettings');
