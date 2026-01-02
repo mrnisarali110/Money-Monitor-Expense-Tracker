@@ -1,25 +1,21 @@
+// Ensure this matches your package.json (usually @google/generative-ai)
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { Transaction } from "../types";
 
-import { GoogleGenAI, Type } from "@google/genai";
-import { Transaction, TransactionType } from "../types";
-
-// Safely retrieve the API key prevents crashes in environments where process is undefined
-const getApiKey = () => {
-  // Use import.meta.env for Vite and the VITE_ prefix
-  return import.meta.env.VITE_API_KEY;
-
-};
-
-const API_KEY = getApiKey();
+// Vite correctly reads this from Netlify Environment Variables
+const API_KEY = import.meta.env.VITE_API_KEY;
 
 export const getFinancialInsights = async (transactions: Transaction[], monthName: string) => {
   if (transactions.length === 0) return "Add some transactions to see smart insights!";
 
-  // Gracefully handle missing API key
   if (!API_KEY) {
-    return "Connect an API Key in settings to enable smart financial insights.";
+    return "Connect an API Key in Netlify settings to enable smart financial insights.";
   }
 
-  const ai = new GoogleGenAI({ apiKey: API_KEY });
+  // Use the correct Class Name from the SDK
+  const genAI = new GoogleGenerativeAI(API_KEY);
+  // Change to a stable model name
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
   const summary = transactions.reduce((acc, t) => {
     if (t.type === 'income') acc.income += t.amount;
@@ -38,58 +34,11 @@ export const getFinancialInsights = async (transactions: Transaction[], monthNam
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-    });
-    return response.text || "Keep tracking to optimize your wealth.";
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text() || "Keep tracking to optimize your wealth.";
   } catch (error: any) {
     console.error("Gemini Error:", error);
     return "Your financial journey is looking solid. Keep it up!";
-  }
-};
-
-export const parseNaturalLanguageTransaction = async (text: string, categories: {income: string[], expense: string[]}) => {
-  // Gracefully handle missing API key
-  if (!API_KEY) {
-    console.warn("Magic Entry requires an API Key.");
-    return null;
-  }
-
-  const ai = new GoogleGenAI({ apiKey: API_KEY });
-  
-  const prompt = `
-    Extract transaction details from this text: "${text}"
-    Available Income Categories: ${categories.income.join(', ')}
-    Available Expense Categories: ${categories.expense.join(', ')}
-    
-    If the category doesn't perfectly match, pick the closest one from the list.
-    If it's clearly income (received, salary, bonus), set type to 'income'. Otherwise 'expense'.
-  `;
-
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            amount: { type: Type.NUMBER },
-            type: { type: Type.STRING, description: "'income' or 'expense'" },
-            category: { type: Type.STRING },
-            note: { type: Type.STRING },
-          },
-          required: ["amount", "type", "category"]
-        }
-      }
-    });
-
-    const result = JSON.parse(response.text || '{}');
-    return result;
-  } catch (error) {
-    console.error("Parsing Error:", error);
-    return null;
   }
 };
