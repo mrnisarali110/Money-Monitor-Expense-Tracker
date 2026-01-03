@@ -2,15 +2,17 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Transaction, TransactionType } from "../types";
 
-export const getFinancialInsights = async (transactions: Transaction[], monthName: string) => {
+export const getFinancialInsights = async (transactions: Transaction[], monthName: string, apiKey?: string) => {
   if (transactions.length === 0) return "Add some transactions to see smart insights!";
 
+  const key = apiKey || process.env.API_KEY;
+
   // Gracefully handle missing API key
-  if (!process.env.API_KEY) {
-    return "API Key not configured in environment variables.";
+  if (!key) {
+    return "API Key missing. Please configure it in Settings.";
   }
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: key });
 
   const summary = transactions.reduce((acc, t) => {
     if (t.type === 'income') acc.income += t.amount;
@@ -36,18 +38,20 @@ export const getFinancialInsights = async (transactions: Transaction[], monthNam
     return response.text || "Keep tracking to optimize your wealth.";
   } catch (error: any) {
     console.error("Gemini Error:", error);
-    return "Unable to generate insights. Please check your API Key configuration.";
+    return "Unable to generate insights. Check your API Key.";
   }
 };
 
-export const parseNaturalLanguageTransaction = async (text: string, categories: {income: string[], expense: string[]}) => {
+export const parseNaturalLanguageTransaction = async (text: string, categories: {income: string[], expense: string[]}, apiKey?: string) => {
+  const key = apiKey || process.env.API_KEY;
+
   // Gracefully handle missing API key
-  if (!process.env.API_KEY) {
+  if (!key) {
     console.warn("Magic Entry requires an API Key.");
     return null;
   }
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: key });
   
   const prompt = `
     Extract transaction details from this text: "${text}"

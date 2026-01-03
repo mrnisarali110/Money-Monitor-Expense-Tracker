@@ -40,7 +40,11 @@ import {
   Cloud,
   CloudLightning,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  Copy,
+  Info,
+  Bell,
+  ExternalLink
 } from 'lucide-react';
 import { 
   Transaction, 
@@ -69,13 +73,18 @@ declare global {
 }
 
 // --- CONFIGURATION ---
-// User provided Client ID. 
-// NOTE: Client Secret is NOT used in frontend applications for security reasons.
-// Added .trim() to ensure no accidental whitespace causes errors.
+// IMPORTANT: This ID is public, but the Secret must be in Netlify Env Vars
 const GOOGLE_CLIENT_ID = '122158674616-928aopvfdh0ckll166gkm7gdu89suoel.apps.googleusercontent.com'.trim();
 
-type TabType = 'home' | 'journal' | 'stats';
+type TabType = 'home' | 'journal' | 'stats' | 'limits';
 type TimePeriod = 'day' | 'week' | 'month' | 'year';
+
+// Notification Type
+interface Notification {
+  id: string;
+  message: string;
+  type: 'success' | 'error' | 'info';
+}
 
 const App: React.FC = () => {
   // --- Persistent State ---
@@ -84,6 +93,9 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [journalPeriod, setJournalPeriod] = useState<TimePeriod>('month');
   const [statsPeriod, setStatsPeriod] = useState<TimePeriod>('month');
+
+  // Notifications State
+  const [notifications, setNotifications] = useState<Notification[]>([]);
 
   const [settings, setSettings] = useState<UserSettings>(() => {
     const saved = localStorage.getItem('userSettings');
@@ -99,8 +111,8 @@ const App: React.FC = () => {
 
   // Calculate AI Authorization
   const isAiAuthorized = useMemo(() => {
-    try { return !!process.env.API_KEY; } catch { return false; }
-  }, []);
+    return !!(settings.apiKey || process.env.API_KEY);
+  }, [settings.apiKey]);
 
   const [currency, setCurrency] = useState<Currency>(() => {
     const saved = localStorage.getItem('currency');
@@ -128,8 +140,12 @@ const App: React.FC = () => {
   });
 
   // --- Google Drive Sync State ---
-  const [userToken, setUserToken] = useState<string | null>(null);
-  const [driveFileId, setDriveFileId] = useState<string | null>(null);
+  // We persist refresh tokens to localStorage so the user stays logged in
+  const [userToken, setUserToken] = useState<string | null>(null); // Access Token (short lived)
+  const [refreshToken, setRefreshToken] = useState<string | null>(() => localStorage.getItem('drive_refresh_token'));
+  const [tokenExpiry, setTokenExpiry] = useState<number>(() => parseInt(localStorage.getItem('drive_token_expiry') || '0'));
+  
+  const [driveFileId, setDriveFileId] = useState<string | null>(() => localStorage.getItem('drive_file_id'));
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
@@ -137,7 +153,6 @@ const App: React.FC = () => {
   // --- UI & Utility State ---
   const [currentDate, setCurrentDate] = useState(new Date());
   const [showAddModal, setShowAddModal] = useState(false);
-  const [showBudgetModal, setShowBudgetModal] = useState(false);
   
   const [insights, setInsights] = useState<string>('Analyzing your wealth...');
   const [loadingInsights, setLoadingInsights] = useState(false);
@@ -166,6 +181,15 @@ const App: React.FC = () => {
   // Migration State
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // --- Notification Helper ---
+  const addNotification = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = Math.random().toString(36).substr(2, 9);
+    setNotifications(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 4000);
+  }, []);
+
   // --- Effects ---
   useEffect(() => {
     localStorage.setItem('transactions', JSON.stringify(transactions));
@@ -176,20 +200,71 @@ const App: React.FC = () => {
     localStorage.setItem('incomeCategories', JSON.stringify(incomeCategories));
     localStorage.setItem('expenseCategories', JSON.stringify(expenseCategories));
     
+    // Persist Auth Data
+    if (refreshToken) localStorage.setItem('drive_refresh_token', refreshToken);
+    else localStorage.removeItem('drive_refresh_token');
+    
+    if (tokenExpiry) localStorage.setItem('drive_token_expiry', tokenExpiry.toString());
+    
+    if (driveFileId) localStorage.setItem('drive_file_id', driveFileId);
+    else localStorage.removeItem('drive_file_id');
+    
     if (settings.theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
-  }, [transactions, budgets, currency, isOnboarded, settings, incomeCategories, expenseCategories]);
+  }, [transactions, budgets, currency, isOnboarded, settings, incomeCategories, expenseCategories, refreshToken, tokenExpiry, driveFileId]);
 
   // --- GOOGLE SYNC LOGIC ---
 
+  // Helper to refresh access token if expired
+  const getValidAccessToken = async (): Promise<string | null> => {
+    // If we have a valid access token in memory, return it
+    if (userToken && Date.now() < tokenExpiry - 60000) { // Buffer of 1 minute
+      return userToken;
+    }
+
+    // If we have a refresh token, try to get a new access token
+    if (refreshToken) {
+      try {
+        setSyncStatus('syncing');
+        const res = await fetch('/.netlify/functions/refresh', {
+          method: 'POST',
+          body: JSON.stringify({ refresh_token: refreshToken })
+        });
+        
+        if (!res.ok) throw new Error('Refresh failed');
+        
+        const data = await res.json();
+        const newAccessToken = data.access_token;
+        const expiresIn = data.expires_in; // seconds
+        
+        setUserToken(newAccessToken);
+        setTokenExpiry(Date.now() + (expiresIn * 1000));
+        setSyncStatus('idle');
+        return newAccessToken;
+      } catch (e) {
+        console.error("Token refresh failed", e);
+        setSyncStatus('error');
+        // Optional: Logout if refresh completely fails
+        // setRefreshToken(null); 
+        // setUserToken(null);
+        return null;
+      }
+    }
+    return null;
+  };
+
   // Auto-save to Drive when data changes (debounced)
   useEffect(() => {
-    if (!userToken || !driveFileId || syncStatus === 'syncing') return;
+    if (!refreshToken && !userToken) return;
+    if (!driveFileId && syncStatus !== 'idle') return;
 
     const saveData = async () => {
+      const validToken = await getValidAccessToken();
+      if (!validToken || !driveFileId) return;
+
       setSyncStatus('syncing');
       try {
         const payload = {
@@ -202,58 +277,78 @@ const App: React.FC = () => {
             incomeCategories,
             expenseCategories
         };
-        await updateAppDataFile(userToken, driveFileId, payload);
+        await updateAppDataFile(validToken, driveFileId, payload);
         setSyncStatus('success');
         setLastSyncTime(Date.now());
         setTimeout(() => setSyncStatus('idle'), 2000);
       } catch (e) {
         console.error("Auto-save failed", e);
         setSyncStatus('error');
+        addNotification("Auto-backup failed. Check connection.", "error");
       }
     };
 
     const timer = setTimeout(saveData, 3000); // 3-second debounce
     return () => clearTimeout(timer);
-  }, [transactions, budgets, settings, currency, incomeCategories, expenseCategories, userToken, driveFileId]);
+  }, [transactions, budgets, settings, currency, incomeCategories, expenseCategories, refreshToken, driveFileId]);
 
 
   const handleGoogleLogin = () => {
     if (!window.google) {
-      alert("Google Identity Services not loaded. Please refresh the page.");
+      addNotification("Google Services not ready. Refresh page.", "error");
       return;
     }
 
     try {
-      const client = window.google.accounts.oauth2.initTokenClient({
+      // Use initCodeClient for Authorization Code Flow (Backend Exchange)
+      const client = window.google.accounts.oauth2.initCodeClient({
         client_id: GOOGLE_CLIENT_ID,
+        // CRITICAL: Using drive.file scope prevents "Access Blocked" / "Policy Violation" errors
+        // This scope only allows access to files created by THIS app, not the user's whole drive.
         scope: 'https://www.googleapis.com/auth/drive.file',
+        ux_mode: 'popup',
         callback: async (response: any) => {
-          if (response.access_token) {
-            setUserToken(response.access_token);
-            setIsSyncing(true);
+          if (response.code) {
             setSyncStatus('syncing');
+            setIsSyncing(true);
             try {
+               // Exchange code for tokens via Netlify Function
+               const tokenRes = await fetch('/.netlify/functions/auth', {
+                 method: 'POST',
+                 body: JSON.stringify({ code: response.code })
+               });
+               
+               if (!tokenRes.ok) throw new Error('Token exchange failed');
+               
+               const tokenData = await tokenRes.json();
+               const { access_token, refresh_token, expires_in } = tokenData;
+
+               // Update State
+               setUserToken(access_token);
+               if (refresh_token) setRefreshToken(refresh_token);
+               setTokenExpiry(Date.now() + (expires_in * 1000));
+
                // 1. Look for existing file
-               const existingFile = await findAppDataFile(response.access_token);
+               const existingFile = await findAppDataFile(access_token);
                
                if (existingFile) {
                  // 2a. Found: Download and merge
                  setDriveFileId(existingFile.id);
-                 const cloudData = await downloadAppData(response.access_token, existingFile.id);
+                 const cloudData = await downloadAppData(access_token, existingFile.id);
                  
                  if (cloudData) {
-                    // Merge logic: Prioritize Cloud if it exists.
-                    if (confirm("Found backup in Google Drive. Load it? This will overwrite local changes made since last sync.")) {
+                    if (confirm("Found backup in Google Drive. Load it?")) {
                         if (cloudData.transactions) setTransactions(cloudData.transactions);
                         if (cloudData.budgets) setBudgets(cloudData.budgets);
                         if (cloudData.settings) setSettings(cloudData.settings);
                         if (cloudData.currency) setCurrency(cloudData.currency);
                         if (cloudData.incomeCategories) setIncomeCategories(cloudData.incomeCategories);
                         if (cloudData.expenseCategories) setExpenseCategories(cloudData.expenseCategories);
+                        addNotification("Data restored from Drive", "success");
                     }
                  }
                } else {
-                 // 2b. Not Found: Create new file with current local data
+                 // 2b. Not Found: Create new file
                  const payload = {
                    version: 1,
                    timestamp: Date.now(),
@@ -264,28 +359,26 @@ const App: React.FC = () => {
                    incomeCategories,
                    expenseCategories
                  };
-                 const newFile = await createAppDataFile(response.access_token, payload);
+                 const newFile = await createAppDataFile(access_token, payload);
                  setDriveFileId(newFile.id);
+                 addNotification("Drive backup created", "success");
                }
                setSyncStatus('success');
                setLastSyncTime(Date.now());
             } catch (error) {
               console.error("Sync init failed", error);
               setSyncStatus('error');
-              alert("Failed to sync with Drive. Please check your network or try again.");
+              addNotification("Failed to sync with Drive", "error");
             } finally {
               setIsSyncing(false);
             }
-          } else if (response.error) {
-             console.error("Google Auth Error:", response);
-             alert(`Google Login Failed: ${response.error_description || response.error}`);
           }
         },
       });
-      client.requestAccessToken();
+      client.requestCode();
     } catch (e: any) {
-        console.error("Token Client Init Error", e);
-        alert(`Could not initialize Google Login: ${e.message}`);
+        console.error("Code Client Init Error", e);
+        addNotification("Auth Init Error", "error");
     }
   };
 
@@ -304,19 +397,40 @@ const App: React.FC = () => {
   const currentPeriod = useMemo(() => getPeriodRange(currentDate, settings.monthStartDay), [currentDate, settings.monthStartDay]);
 
   const getFilteredTransactions = (periodType: TimePeriod) => {
-    const now = new Date();
+    const toISODate = (d: Date) => d.toISOString().split('T')[0];
+    const anchorDate = new Date(currentDate);
+
     return transactions.filter(t => {
-      const d = new Date(t.date);
-      if (periodType === 'day') return d.toDateString() === now.toDateString();
-      if (periodType === 'week') return (now.getTime() - d.getTime()) <= 7 * 24 * 60 * 60 * 1000;
-      if (periodType === 'month') return d >= currentPeriod.start && d <= currentPeriod.end;
-      if (periodType === 'year') return d.getFullYear() === currentDate.getFullYear();
+      const tDateString = t.date;
+      const tDate = new Date(tDateString);
+      
+      if (periodType === 'day') {
+          return tDateString === toISODate(anchorDate);
+      }
+      if (periodType === 'week') {
+          const currentDay = anchorDate.getDay(); 
+          const diffToSunday = anchorDate.getDate() - currentDay;
+          const startOfWeek = new Date(anchorDate);
+          startOfWeek.setDate(diffToSunday);
+          const endOfWeek = new Date(startOfWeek);
+          endOfWeek.setDate(startOfWeek.getDate() + 6);
+          const tTime = tDate.getTime();
+          const sTime = new Date(toISODate(startOfWeek)).getTime();
+          const eTime = new Date(toISODate(endOfWeek)).getTime();
+          return tTime >= sTime && tTime <= eTime;
+      }
+      if (periodType === 'month') {
+          return tDate >= currentPeriod.start && tDate <= currentPeriod.end;
+      }
+      if (periodType === 'year') {
+          return tDate.getFullYear() === anchorDate.getFullYear();
+      }
       return true;
     }).sort((a, b) => b.timestamp - a.timestamp);
   };
 
-  const journalTransactions = useMemo(() => getFilteredTransactions(journalPeriod), [transactions, journalPeriod, currentPeriod]);
-  const statsTransactions = useMemo(() => getFilteredTransactions(statsPeriod), [transactions, statsPeriod, currentPeriod]);
+  const journalTransactions = useMemo(() => getFilteredTransactions(journalPeriod), [transactions, journalPeriod, currentPeriod, currentDate]);
+  const statsTransactions = useMemo(() => getFilteredTransactions(statsPeriod), [transactions, statsPeriod, currentPeriod, currentDate]);
   
   const dailyActivity = useMemo(() => {
     const last7Days = Array.from({length: 7}, (_, i) => {
@@ -352,9 +466,25 @@ const App: React.FC = () => {
     }, { income: 0, expense: 0 });
   }, [transactions, currentPeriod]);
 
+  const statsTabTotals = useMemo(() => {
+    return statsTransactions.reduce((acc, t) => {
+        if (t.type === 'income') acc.income += t.amount;
+        else acc.expense += t.amount;
+        return acc;
+    }, { income: 0, expense: 0 });
+  }, [statsTransactions]);
+
   const totalHistoricalBalance = useMemo(() => {
+    // Calculate Net Financial Position (Total Savings) till today
+    const now = new Date();
+    // Use en-CA for YYYY-MM-DD format in local time
+    const todayStr = now.toLocaleDateString('en-CA'); 
+    
     return transactions.reduce((acc, t) => {
-      return t.type === 'income' ? acc + t.amount : acc - t.amount;
+      if (t.date <= todayStr) {
+        return t.type === 'income' ? acc + t.amount : acc - t.amount;
+      }
+      return acc;
     }, 0);
   }, [transactions]);
 
@@ -366,7 +496,7 @@ const App: React.FC = () => {
       id: Math.random().toString(36).substr(2, 9),
       name: newCustomCategoryName.trim(),
       icon: newCustomCategoryEmoji,
-      color: '#6366f1', // default indigo
+      color: '#6366f1',
       type: newType
     };
 
@@ -386,14 +516,18 @@ const App: React.FC = () => {
     e.preventDefault();
     if (!magicText.trim() || isMagicParsing) return;
     if (!isAiAuthorized) {
-        alert("API Key is missing in environment variables.");
+        addNotification("API Key missing. Check Settings.", "error");
         return;
     }
     setIsMagicParsing(true);
-    const parsed = await parseNaturalLanguageTransaction(magicText, {
-      income: incomeCategories.map(c => c.name),
-      expense: expenseCategories.map(c => c.name)
-    });
+    const parsed = await parseNaturalLanguageTransaction(
+      magicText, 
+      {
+        income: incomeCategories.map(c => c.name),
+        expense: expenseCategories.map(c => c.name)
+      },
+      settings.apiKey
+    );
 
     if (parsed && parsed.amount > 0) {
       const transaction: Transaction = {
@@ -407,31 +541,37 @@ const App: React.FC = () => {
       };
       setTransactions(prev => [transaction, ...prev]);
       setMagicText('');
+      addNotification("Smart Entry Added", "success");
     } else {
-      alert("Could not process transaction. Please try again or enter manually.");
+      addNotification("AI could not understand request.", "error");
     }
     setIsMagicParsing(false);
   };
 
   const handleExportData = () => {
-    const headers = ['Date', 'Type', 'Category', 'Amount', 'Note'];
-    const rows = transactions.map(t => [
-      t.date,
-      t.type,
-      t.category,
-      t.amount.toString(),
-      t.note || ''
-    ]);
-    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", `luxe_ledger_export.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      const headers = ['Date', 'Type', 'Category', 'Amount', 'Note'];
+      const rows = transactions.map(t => [
+        t.date,
+        t.type,
+        t.category,
+        t.amount.toString(),
+        t.note || ''
+      ]);
+      const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      link.setAttribute("href", url);
+      link.setAttribute("download", `luxe_ledger_export.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      addNotification("CSV Export Successful", "success");
+    } catch (e) {
+      addNotification("Export Failed", "error");
+    }
   };
 
   const handleDownloadTemplate = () => {
@@ -447,6 +587,7 @@ const App: React.FC = () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    addNotification("Template Downloaded", "success");
   }
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -454,33 +595,37 @@ const App: React.FC = () => {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (e) => {
-      const content = e.target?.result as string;
-      const lines = content.split('\n');
-      const newTransactions: Transaction[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const parts = line.split(',');
-        if (parts.length >= 4) {
-          const [date, type, category, amount, note] = parts;
-          if ((type === 'income' || type === 'expense') && !isNaN(parseFloat(amount))) {
-             newTransactions.push({
-               id: Math.random().toString(36).substr(2, 9),
-               date: date.trim(),
-               type: type as TransactionType,
-               category: category.trim(),
-               amount: parseFloat(amount),
-               note: note ? note.trim() : '',
-               timestamp: new Date(date).getTime()
-             });
+      try {
+        const content = e.target?.result as string;
+        const lines = content.split('\n');
+        const newTransactions: Transaction[] = [];
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const parts = line.split(',');
+          if (parts.length >= 4) {
+            const [date, type, category, amount, note] = parts;
+            if ((type === 'income' || type === 'expense') && !isNaN(parseFloat(amount))) {
+              newTransactions.push({
+                id: Math.random().toString(36).substr(2, 9),
+                date: date.trim(),
+                type: type as TransactionType,
+                category: category.trim(),
+                amount: parseFloat(amount),
+                note: note ? note.trim() : '',
+                timestamp: new Date(date).getTime()
+              });
+            }
           }
         }
-      }
-      if (newTransactions.length > 0) {
-        setTransactions(prev => [...prev, ...newTransactions]);
-        alert(`Successfully imported ${newTransactions.length} transactions.`);
-      } else {
-        alert('No valid transactions found in file. Please use the template.');
+        if (newTransactions.length > 0) {
+          setTransactions(prev => [...prev, ...newTransactions]);
+          addNotification(`Imported ${newTransactions.length} records`, "success");
+        } else {
+          addNotification("No valid records found in file.", "error");
+        }
+      } catch (err) {
+        addNotification("Failed to parse CSV file", "error");
       }
     };
     reader.readAsText(file);
@@ -497,6 +642,7 @@ const App: React.FC = () => {
         amount: parseFloat(newAmount),
         note: newNote,
       } : t));
+      addNotification("Transaction Updated", "success");
     } else {
       const transaction: Transaction = {
         id: Math.random().toString(36).substr(2, 9),
@@ -508,6 +654,7 @@ const App: React.FC = () => {
         timestamp: Date.now()
       };
       setTransactions(prev => [transaction, ...prev]);
+      addNotification("Transaction Added", "success");
     }
     setShowAddModal(false);
     resetForm();
@@ -530,8 +677,10 @@ const App: React.FC = () => {
         const existing = prev.filter(b => b.categoryName !== editingBudgetCategory);
         return [...existing, { categoryName: editingBudgetCategory, limit }];
       });
+      addNotification(`Limit set for ${editingBudgetCategory}`, "success");
     } else {
       setBudgets(prev => prev.filter(b => b.categoryName !== editingBudgetCategory));
+      addNotification(`Limit removed for ${editingBudgetCategory}`, "info");
     }
     setEditingBudgetCategory(null);
   };
@@ -554,13 +703,17 @@ const App: React.FC = () => {
     if (!isOnboarded || transactions.length === 0 || !isAiAuthorized) return;
     const fetchInsights = async () => {
       setLoadingInsights(true);
-      const res = await getFinancialInsights(transactions, MONTHS[currentDate.getMonth()]);
+      const res = await getFinancialInsights(
+        transactions, 
+        MONTHS[currentDate.getMonth()],
+        settings.apiKey
+      );
       setInsights(res);
       setLoadingInsights(false);
     };
     const timer = setTimeout(fetchInsights, 2000);
     return () => clearTimeout(timer);
-  }, [transactions.length, isAiAuthorized, isOnboarded]);
+  }, [transactions.length, isAiAuthorized, isOnboarded, settings.apiKey]);
 
   const getBudgetProgress = (catName: string) => {
     const limit = budgets.find(b => b.categoryName === catName)?.limit || 0;
@@ -601,6 +754,25 @@ const App: React.FC = () => {
 
   return (
     <div className={`min-h-screen pb-24 flex flex-col max-w-lg mx-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors relative overflow-x-hidden ${settings.theme}`}>
+      {/* Toast Notifications */}
+      <div className="fixed top-4 right-4 z-[70] flex flex-col items-end space-y-2 pointer-events-none px-4">
+        {notifications.map(n => (
+          <div 
+            key={n.id} 
+            className={`flex items-center space-x-2 px-4 py-3 rounded-2xl shadow-xl backdrop-blur-md border animate-in slide-in-from-right-8 duration-300 ${
+              n.type === 'success' ? 'bg-emerald-500/90 text-white border-emerald-400' : 
+              n.type === 'error' ? 'bg-rose-500/90 text-white border-rose-400' : 
+              'bg-slate-800/90 text-white border-slate-700'
+            }`}
+          >
+            {n.type === 'success' && <CheckCircle2 size={16} />}
+            {n.type === 'error' && <AlertCircle size={16} />}
+            {n.type === 'info' && <Info size={16} />}
+            <span className="text-xs font-bold uppercase tracking-wide">{n.message}</span>
+          </div>
+        ))}
+      </div>
+
       {/* Header */}
       <header className="sticky top-0 z-20 glass dark:bg-slate-900/80 px-6 py-4 flex items-center justify-between premium-shadow">
         <div className="flex items-center space-x-2">
@@ -622,7 +794,7 @@ const App: React.FC = () => {
 
       <main className="px-6 pt-6 space-y-6 flex-1 overflow-y-auto no-scrollbar">
         {/* SYNC STATUS BANNER (Only if connected) */}
-        {userToken && (
+        {(refreshToken || userToken) && (
             <div className={`flex items-center justify-between px-4 py-2 rounded-2xl text-[10px] font-bold uppercase tracking-widest transition-all ${syncStatus === 'error' ? 'bg-red-50 text-red-600' : 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600'}`}>
                <div className="flex items-center space-x-2">
                   {syncStatus === 'syncing' ? <RefreshCw size={12} className="animate-spin" /> : <CloudLightning size={12} />}
@@ -761,7 +933,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* Tab: Journal (Existing Code Structure Preserved) */}
+        {/* Tab: Journal */}
         {activeTab === 'journal' && (
            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
              <div className="flex flex-col space-y-4">
@@ -819,7 +991,7 @@ const App: React.FC = () => {
            </div>
         )}
 
-        {/* Tab: Stats (Existing Code Structure Preserved) */}
+        {/* Tab: Stats */}
         {activeTab === 'stats' && (
            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
              <div className="flex flex-col space-y-4">
@@ -829,29 +1001,134 @@ const App: React.FC = () => {
                    <button key={p} onClick={() => setStatsPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${statsPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
                  ))}
                </div>
+               <p className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                  Showing Stats for {statsPeriod === 'day' ? 'Selected Day' : statsPeriod === 'week' ? 'Selected Week' : statsPeriod === 'month' ? MONTHS[currentDate.getMonth()] : currentDate.getFullYear()}
+               </p>
              </div>
-             <div className="grid grid-cols-1 gap-4">
-              <div className="bg-white dark:bg-slate-900 p-7 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800 flex items-center justify-between">
-                <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Period Volume</p>
-                  <p className="text-3xl font-black">{formatPrice(statsTransactions.reduce((acc, t) => acc + t.amount, 0))}</p>
+             
+             {/* Stats Cards */}
+             <div className="grid grid-cols-2 gap-3">
+                <div className="bg-emerald-50 dark:bg-emerald-950/20 p-5 rounded-[2rem] border border-emerald-100 dark:border-emerald-900/50">
+                    <div className="flex items-center space-x-2 mb-2 text-emerald-600">
+                        <TrendingUp size={16} />
+                        <span className="text-[9px] font-black uppercase tracking-widest">Income</span>
+                    </div>
+                    <p className="text-xl font-black text-emerald-700 dark:text-emerald-400">{formatPrice(statsTabTotals.income)}</p>
                 </div>
-                <div className={`px-4 py-2 rounded-2xl font-black text-[10px] uppercase tracking-widest ${periodStats.income >= periodStats.expense ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
-                  {periodStats.income >= periodStats.expense ? 'SURPLUS' : 'DEFICIT'}
+                <div className="bg-rose-50 dark:bg-rose-950/20 p-5 rounded-[2rem] border border-rose-100 dark:border-rose-900/50">
+                    <div className="flex items-center space-x-2 mb-2 text-rose-600">
+                        <TrendingDown size={16} />
+                        <span className="text-[9px] font-black uppercase tracking-widest">Expense</span>
+                    </div>
+                    <p className="text-xl font-black text-rose-700 dark:text-rose-400">{formatPrice(statsTabTotals.expense)}</p>
+                </div>
+             </div>
+
+             <div className="bg-white dark:bg-slate-900 p-7 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800 flex items-center justify-between">
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Net Savings</p>
+                  <p className={`text-3xl font-black ${statsTabTotals.income >= statsTabTotals.expense ? 'text-slate-800 dark:text-white' : 'text-rose-500'}`}>
+                      {formatPrice(statsTabTotals.income - statsTabTotals.expense)}
+                  </p>
+                </div>
+                <div className={`px-4 py-2 rounded-2xl font-black text-[10px] uppercase tracking-widest ${statsTabTotals.income >= statsTabTotals.expense ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
+                  {statsTabTotals.income >= statsTabTotals.expense ? 'SURPLUS' : 'DEFICIT'}
                 </div>
               </div>
-            </div>
 
             <div className="space-y-6">
               <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
                 <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Expenses</h4>
-                <PremiumChart transactions={statsTransactions} type="expense" />
+                <PremiumChart transactions={statsTransactions} type="expense" currencySymbol={currency.symbol} />
               </div>
               <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
                 <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Inflow</h4>
-                <PremiumChart transactions={statsTransactions} type="income" />
+                <PremiumChart transactions={statsTransactions} type="income" currencySymbol={currency.symbol} />
               </div>
             </div>
+           </div>
+        )}
+
+        {/* Tab: Limits (Converted from Modal) */}
+        {activeTab === 'limits' && (
+           <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+               <div className="flex flex-col space-y-4">
+                 <h3 className="text-2xl font-black tracking-tight px-1 text-center">Budget Limits</h3>
+                 <p className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                    Manage your spending caps
+                 </p>
+               </div>
+
+                <div className="grid grid-cols-1 gap-4">
+                   {expenseCategories.map(cat => {
+                     const { limit, spent } = getBudgetProgress(cat.name);
+                     const percent = limit > 0 ? Math.min((spent / limit) * 100, 100) : 0;
+                     const isEditing = editingBudgetCategory === cat.name;
+
+                     return (
+                       <div key={cat.id} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] shadow-sm border border-slate-100 dark:border-slate-800 relative overflow-hidden">
+                          <div 
+                            className="absolute bottom-0 left-0 h-1 bg-indigo-600 transition-all duration-1000" 
+                            style={{ width: `${percent}%`, backgroundColor: percent >= 100 ? '#f43f5e' : '#4f46e5' }}
+                          ></div>
+
+                          <div className="flex justify-between items-start mb-4">
+                            <div className="flex items-center space-x-3">
+                              <div className="text-3xl bg-slate-50 dark:bg-slate-800 w-12 h-12 flex items-center justify-center rounded-2xl">{cat.icon}</div>
+                              <div>
+                                <h3 className="font-bold text-sm">{cat.name}</h3>
+                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
+                                  {limit > 0 ? `${Math.round(percent)}% Used` : 'No Limit Set'}
+                                </p>
+                              </div>
+                            </div>
+                            <button 
+                              onClick={() => {
+                                if (isEditing) handleSaveBudget();
+                                else {
+                                  setEditingBudgetCategory(cat.name);
+                                  setEditingBudgetLimit(limit.toString());
+                                }
+                              }}
+                              className={`p-2 rounded-xl transition-all ${isEditing ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-400'}`}
+                            >
+                              {isEditing ? <CheckCircle2 size={18} /> : <Edit3 size={18} />}
+                            </button>
+                          </div>
+
+                          {isEditing ? (
+                            <div className="animate-in fade-in slide-in-from-top-2">
+                               <div className="relative">
+                                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">{currency.symbol}</span>
+                                  <input 
+                                    type="number" 
+                                    autoFocus
+                                    value={editingBudgetLimit}
+                                    onChange={(e) => setEditingBudgetLimit(e.target.value)}
+                                    placeholder="Set limit"
+                                    className="w-full bg-slate-50 dark:bg-slate-800 pl-10 pr-4 py-3 rounded-xl font-black text-lg"
+                                  />
+                               </div>
+                               <p className="text-[9px] text-slate-400 mt-2 ml-2">Set to 0 to remove limit.</p>
+                            </div>
+                          ) : (
+                            <div className="flex justify-between items-end">
+                              <div>
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Spent</p>
+                                <p className="text-lg font-black">{formatPrice(spent)}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cap</p>
+                                <p className={`text-lg font-black ${limit > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-300'}`}>
+                                  {limit > 0 ? formatPrice(limit) : '∞'}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                       </div>
+                     );
+                   })}
+                </div>
            </div>
         )}
       </main>
@@ -879,8 +1156,8 @@ const App: React.FC = () => {
             <PieIcon size={22} strokeWidth={activeTab === 'stats' ? 2.5 : 2} />
             <span className="text-[10px] font-black uppercase tracking-widest">Stats</span>
           </button>
-          <button onClick={() => setShowBudgetModal(true)} className="flex flex-col items-center space-y-1 text-slate-400 hover:text-indigo-500 transition-colors">
-            <TrendingUp size={22} />
+          <button onClick={() => setActiveTab('limits')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'limits' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
+            <TrendingUp size={22} strokeWidth={activeTab === 'limits' ? 2.5 : 2} />
             <span className="text-[10px] font-black uppercase tracking-widest">Limits</span>
           </button>
         </div>
@@ -896,6 +1173,45 @@ const App: React.FC = () => {
                 <button onClick={() => setShowSettings(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
               </div>
 
+               {/* Intelligence Section (API Key) */}
+               <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-indigo-500 mb-2">
+                   <Sparkles size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">AI Connection</h3>
+                 </div>
+                 
+                 <div className="bg-[#0f172a] rounded-[2rem] p-6 text-white relative overflow-hidden shadow-xl border border-slate-800">
+                     {/* Status Indicator */}
+                     <div className="flex items-center gap-4 mb-6">
+                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border-2 ${settings.apiKey ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30'}`}>
+                           {settings.apiKey ? <CheckCircle2 size={24} /> : <AlertCircle size={24} />}
+                        </div>
+                        <div>
+                           <h4 className="font-bold text-lg leading-tight tracking-tight">{settings.apiKey ? 'AI Ready' : 'Key Missing'}</h4>
+                           <p className="text-[11px] text-slate-400 font-medium">{settings.apiKey ? 'Gemini is active' : 'Connect API Key below'}</p>
+                        </div>
+                     </div>
+                     
+                     {/* Input Field */}
+                     <div className="relative group">
+                        <Key className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" size={18} />
+                        <input 
+                          type="password" 
+                          value={settings.apiKey || ''}
+                          onChange={e => setSettings({...settings, apiKey: e.target.value})}
+                          placeholder="Paste Gemini API Key (Alza...)"
+                          className="w-full bg-[#1e293b] border border-slate-700 rounded-full pl-12 pr-6 py-4 text-sm font-bold focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all placeholder:text-slate-600 shadow-inner"
+                        />
+                     </div>
+                     
+                     {/* Link */}
+                     <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 mt-4 ml-2 text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition-colors uppercase tracking-wide">
+                        <span>Get a free key at Google AI Studio</span>
+                        <ExternalLink size={10} />
+                     </a>
+                  </div>
+              </section>
+
               {/* Cloud Sync Section - Google Drive */}
               <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-slate-400 mb-2">
@@ -903,7 +1219,7 @@ const App: React.FC = () => {
                    <h3 className="text-[10px] font-black uppercase tracking-widest">Cloud Sync</h3>
                  </div>
                  <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                    {userToken ? (
+                    {(refreshToken || userToken) ? (
                         <div className="space-y-4">
                             <div className="flex items-center space-x-3 text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 p-4 rounded-2xl">
                                 <CheckCircle2 size={24} />
@@ -916,6 +1232,7 @@ const App: React.FC = () => {
                                 onClick={() => {
                                     if(confirm("Log out of Drive? Local data will remain.")) {
                                         setUserToken(null);
+                                        setRefreshToken(null);
                                         setDriveFileId(null);
                                     }
                                 }}
@@ -1124,91 +1441,6 @@ const App: React.FC = () => {
                 </button>
               </>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* Budget Modal */}
-      {showBudgetModal && (
-        <div className="fixed inset-0 z-[60] flex justify-center bg-slate-50 dark:bg-slate-950">
-          <div className="w-full max-w-lg h-full overflow-y-auto no-scrollbar animate-in slide-in-from-bottom duration-300">
-             <div className="p-6 space-y-6 pb-32">
-                <div className="flex justify-between items-center sticky top-0 bg-slate-50 dark:bg-slate-950 z-10 py-4">
-                  <h2 className="text-3xl font-black tracking-tighter">Budget Limits</h2>
-                  <button onClick={() => setShowBudgetModal(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
-                </div>
-
-                <div className="grid grid-cols-1 gap-4">
-                   {expenseCategories.map(cat => {
-                     const { limit, spent } = getBudgetProgress(cat.name);
-                     const percent = limit > 0 ? Math.min((spent / limit) * 100, 100) : 0;
-                     const isEditing = editingBudgetCategory === cat.name;
-
-                     return (
-                       <div key={cat.id} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] shadow-sm border border-slate-100 dark:border-slate-800 relative overflow-hidden">
-                          <div 
-                            className="absolute bottom-0 left-0 h-1 bg-indigo-600 transition-all duration-1000" 
-                            style={{ width: `${percent}%`, backgroundColor: percent >= 100 ? '#f43f5e' : '#4f46e5' }}
-                          ></div>
-
-                          <div className="flex justify-between items-start mb-4">
-                            <div className="flex items-center space-x-3">
-                              <div className="text-3xl bg-slate-50 dark:bg-slate-800 w-12 h-12 flex items-center justify-center rounded-2xl">{cat.icon}</div>
-                              <div>
-                                <h3 className="font-bold text-sm">{cat.name}</h3>
-                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
-                                  {limit > 0 ? `${Math.round(percent)}% Used` : 'No Limit Set'}
-                                </p>
-                              </div>
-                            </div>
-                            <button 
-                              onClick={() => {
-                                if (isEditing) handleSaveBudget();
-                                else {
-                                  setEditingBudgetCategory(cat.name);
-                                  setEditingBudgetLimit(limit.toString());
-                                }
-                              }}
-                              className={`p-2 rounded-xl transition-all ${isEditing ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-400'}`}
-                            >
-                              {isEditing ? <CheckCircle2 size={18} /> : <Edit3 size={18} />}
-                            </button>
-                          </div>
-
-                          {isEditing ? (
-                            <div className="animate-in fade-in slide-in-from-top-2">
-                               <div className="relative">
-                                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">{currency.symbol}</span>
-                                  <input 
-                                    type="number" 
-                                    autoFocus
-                                    value={editingBudgetLimit}
-                                    onChange={(e) => setEditingBudgetLimit(e.target.value)}
-                                    placeholder="Set limit"
-                                    className="w-full bg-slate-50 dark:bg-slate-800 pl-10 pr-4 py-3 rounded-xl font-black text-lg"
-                                  />
-                               </div>
-                               <p className="text-[9px] text-slate-400 mt-2 ml-2">Set to 0 to remove limit.</p>
-                            </div>
-                          ) : (
-                            <div className="flex justify-between items-end">
-                              <div>
-                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Spent</p>
-                                <p className="text-lg font-black">{formatPrice(spent)}</p>
-                              </div>
-                              <div className="text-right">
-                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cap</p>
-                                <p className={`text-lg font-black ${limit > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-300'}`}>
-                                  {limit > 0 ? formatPrice(limit) : '∞'}
-                                </p>
-                              </div>
-                            </div>
-                          )}
-                       </div>
-                     );
-                   })}
-                </div>
-             </div>
           </div>
         </div>
       )}

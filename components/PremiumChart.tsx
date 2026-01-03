@@ -6,9 +6,10 @@ import { Transaction } from '../types';
 interface PremiumChartProps {
   transactions: Transaction[];
   type: 'income' | 'expense';
+  currencySymbol: string;
 }
 
-export const PremiumChart: React.FC<PremiumChartProps> = ({ transactions, type }) => {
+export const PremiumChart: React.FC<PremiumChartProps> = ({ transactions, type, currencySymbol }) => {
   const filtered = transactions.filter(t => t.type === type);
   
   const dataMap = filtered.reduce((acc: any, t) => {
@@ -56,17 +57,21 @@ export const PremiumChart: React.FC<PremiumChartProps> = ({ transactions, type }
           <Tooltip 
             cursor={{ fill: 'transparent' }}
             contentStyle={{ 
-              borderRadius: '20px', 
+              borderRadius: '16px', 
               border: 'none', 
-              boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)',
+              boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)',
               padding: '12px 16px',
-              fontSize: '11px',
-              fontWeight: 'bold',
-              background: 'rgba(15, 23, 42, 0.95)',
+              fontSize: '12px',
+              fontWeight: '600',
+              backgroundColor: 'rgba(15, 23, 42, 0.95)',
               color: '#fff'
             }}
             itemStyle={{ color: '#fff' }}
-            formatter={(value: number) => [`${value.toLocaleString()}`, 'Amount']}
+            separator=": "
+            formatter={(value: number, name: string) => [
+              `${currencySymbol} ${value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`, 
+              name
+            ]}
           />
         </PieChart>
       </ResponsiveContainer>
