@@ -55,7 +55,12 @@ import {
 import { PremiumChart } from './components/PremiumChart';
 import { getFinancialInsights, parseNaturalLanguageTransaction } from './services/geminiService';
 import { auth, db } from './firebaseConfig';
-import firebase from 'firebase/app';
+import firebase from 'firebase/compat/app';
+import 'firebase/compat/auth';
+import 'firebase/compat/firestore';
+
+// Define User type alias for convenience
+type User = firebase.User;
 
 // Fix for window.google TS error
 declare global {
@@ -129,7 +134,7 @@ const App: React.FC = () => {
   });
 
   // --- Firebase Auth State ---
-  const [firebaseUser, setFirebaseUser] = useState<firebase.User | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
   const [authEmail, setAuthEmail] = useState('');
@@ -185,7 +190,7 @@ const App: React.FC = () => {
 
   // --- Effects ---
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+    const unsubscribe = auth.onAuthStateChanged(async (user: User | null) => {
       if (user) {
         // Enforce Email Verification for Email/Password users
         const isEmailProvider = user.providerData.some(p => p.providerId === 'password');
@@ -215,6 +220,7 @@ const App: React.FC = () => {
                if (data?.budgets) setBudgets(data.budgets);
                if (data?.settings) {
                  setSettings(data.settings);
+                 // Update local state if it differs from cloud
                  setHideBalances(data.settings.stealthMode);
                }
                if (data?.currency) setCurrency(data.currency);
