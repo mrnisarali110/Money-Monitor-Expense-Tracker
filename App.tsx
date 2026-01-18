@@ -13,38 +13,30 @@ import {
   LayoutDashboard,
   CalendarDays,
   PieChart as PieIcon,
-  PlusCircle,
   Clock,
   Moon,
   Sun,
   Eye,
   EyeOff,
-  User,
-  Trash2,
-  Calendar,
+  User as UserIcon,
   Database,
   Download,
   Zap,
   CheckCircle2,
   AlertCircle,
-  ShieldCheck,
   Lock,
   MessageSquare,
   Key,
   Upload,
   FileSpreadsheet,
-  Save,
   Edit3,
   LogOut,
-  ArrowRight,
-  Cloud,
-  CloudLightning,
   Loader2,
-  RefreshCw,
-  Copy,
   Info,
-  Bell,
-  ExternalLink
+  ExternalLink,
+  Mail,
+  Chrome,
+  LogIn
 } from 'lucide-react';
 import { 
   Transaction, 
@@ -63,7 +55,8 @@ import {
 } from './constants';
 import { PremiumChart } from './components/PremiumChart';
 import { getFinancialInsights, parseNaturalLanguageTransaction } from './services/geminiService';
-import { findAppDataFile, downloadAppData, createAppDataFile, updateAppDataFile } from './services/driveService';
+import { auth, db } from './firebaseConfig';
+import firebase from 'firebase/app';
 
 // Fix for window.google TS error
 declare global {
@@ -73,9 +66,6 @@ declare global {
 }
 
 // --- CONFIGURATION ---
-// IMPORTANT: This ID is public, but the Secret must be in Netlify Env Vars
-const GOOGLE_CLIENT_ID = '122158674616-928aopvfdh0ckll166gkm7gdu89suoel.apps.googleusercontent.com'.trim();
-
 type TabType = 'home' | 'journal' | 'stats' | 'limits';
 type TimePeriod = 'day' | 'week' | 'month' | 'year';
 
@@ -139,16 +129,18 @@ const App: React.FC = () => {
     return saved ? JSON.parse(saved) : INITIAL_EXPENSE_CATEGORIES;
   });
 
-  // --- Google Drive Sync State ---
-  // We persist refresh tokens to localStorage so the user stays logged in
-  const [userToken, setUserToken] = useState<string | null>(null); // Access Token (short lived)
-  const [refreshToken, setRefreshToken] = useState<string | null>(() => localStorage.getItem('drive_refresh_token'));
-  const [tokenExpiry, setTokenExpiry] = useState<number>(() => parseInt(localStorage.getItem('drive_token_expiry') || '0'));
+  // --- Firebase Auth State ---
+  const [firebaseUser, setFirebaseUser] = useState<firebase.User | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
   
-  const [driveFileId, setDriveFileId] = useState<string | null>(() => localStorage.getItem('drive_file_id'));
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncTime, setLastSyncTime] = useState<number | null>(null);
-  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
+  // Verification State
+  const [verificationRequired, setVerificationRequired] = useState(false);
+  const [verificationEmail, setVerificationEmail] = useState('');
 
   // --- UI & Utility State ---
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -156,6 +148,8 @@ const App: React.FC = () => {
   
   const [insights, setInsights] = useState<string>('Analyzing your wealth...');
   const [loadingInsights, setLoadingInsights] = useState(false);
+  
+  // Use state for hideBalances but initialize from settings
   const [hideBalances, setHideBalances] = useState(settings.stealthMode);
 
   // Magic Entry State
@@ -192,6 +186,93 @@ const App: React.FC = () => {
 
   // --- Effects ---
   useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+      if (user) {
+        // Enforce Email Verification for Email/Password users
+        const isEmailProvider = user.providerData.some(p => p.providerId === 'password');
+        
+        if (isEmailProvider && !user.emailVerified) {
+          // Block access
+          setVerificationEmail(user.email || '');
+          setVerificationRequired(true);
+          setShowAuthModal(true);
+          await auth.signOut(); // Sign out immediately
+          setFirebaseUser(null);
+        } else {
+          // Valid User
+          setFirebaseUser(user);
+          setVerificationRequired(false);
+          setShowAuthModal(false);
+
+          // --- FIRESTORE SYNC: LOAD DATA ---
+          try {
+             const docRef = db.collection("users").doc(user.uid);
+             const docSnap = await docRef.get();
+             
+             if (docSnap.exists) {
+               const data = docSnap.data();
+               // Load data from Firestore to App State
+               if (data?.transactions) setTransactions(data.transactions);
+               if (data?.budgets) setBudgets(data.budgets);
+               if (data?.settings) {
+                 setSettings(data.settings);
+                 // Update local state if it differs from cloud
+                 setHideBalances(data.settings.stealthMode);
+               }
+               if (data?.currency) setCurrency(data.currency);
+               if (data?.incomeCategories) setIncomeCategories(data.incomeCategories);
+               if (data?.expenseCategories) setExpenseCategories(data.expenseCategories);
+               addNotification("Synced with Cloud", "success");
+             } else {
+               // First time login? Save current local data to cloud
+               await docRef.set({
+                  transactions,
+                  budgets,
+                  settings,
+                  currency,
+                  incomeCategories,
+                  expenseCategories,
+                  lastUpdated: Date.now()
+               });
+             }
+          } catch (error) {
+            console.error("Firestore Load Error", error);
+          }
+        }
+      } else {
+        setFirebaseUser(null);
+      }
+    });
+    return () => unsubscribe();
+  }, []); // Run only on mount to set up listener
+
+  // --- FIRESTORE SYNC: SAVE DATA ---
+  // Debounced save when data changes, ONLY if user is logged in
+  useEffect(() => {
+    if (!firebaseUser) return;
+
+    const saveToFirestore = async () => {
+      try {
+        await db.collection("users").doc(firebaseUser.uid).set({
+           transactions,
+           budgets,
+           settings,
+           currency,
+           incomeCategories,
+           expenseCategories,
+           lastUpdated: Date.now()
+        }, { merge: true });
+      } catch (e) {
+        console.error("Firestore Save Error", e);
+      }
+    };
+
+    const timer = setTimeout(saveToFirestore, 2000); // 2s debounce
+    return () => clearTimeout(timer);
+  }, [transactions, budgets, settings, currency, incomeCategories, expenseCategories, firebaseUser]);
+
+  // Local Persistence
+  useEffect(() => {
     localStorage.setItem('transactions', JSON.stringify(transactions));
     localStorage.setItem('budgets', JSON.stringify(budgets));
     localStorage.setItem('currency', JSON.stringify(currency));
@@ -200,185 +281,95 @@ const App: React.FC = () => {
     localStorage.setItem('incomeCategories', JSON.stringify(incomeCategories));
     localStorage.setItem('expenseCategories', JSON.stringify(expenseCategories));
     
-    // Persist Auth Data
-    if (refreshToken) localStorage.setItem('drive_refresh_token', refreshToken);
-    else localStorage.removeItem('drive_refresh_token');
-    
-    if (tokenExpiry) localStorage.setItem('drive_token_expiry', tokenExpiry.toString());
-    
-    if (driveFileId) localStorage.setItem('drive_file_id', driveFileId);
-    else localStorage.removeItem('drive_file_id');
-    
     if (settings.theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
-  }, [transactions, budgets, currency, isOnboarded, settings, incomeCategories, expenseCategories, refreshToken, tokenExpiry, driveFileId]);
+  }, [transactions, budgets, currency, isOnboarded, settings, incomeCategories, expenseCategories]);
 
-  // --- GOOGLE SYNC LOGIC ---
-
-  // Helper to refresh access token if expired
-  const getValidAccessToken = async (): Promise<string | null> => {
-    // If we have a valid access token in memory, return it
-    if (userToken && Date.now() < tokenExpiry - 60000) { // Buffer of 1 minute
-      return userToken;
-    }
-
-    // If we have a refresh token, try to get a new access token
-    if (refreshToken) {
-      try {
-        setSyncStatus('syncing');
-        const res = await fetch('/.netlify/functions/refresh', {
-          method: 'POST',
-          body: JSON.stringify({ refresh_token: refreshToken })
-        });
-        
-        if (!res.ok) throw new Error('Refresh failed');
-        
-        const data = await res.json();
-        const newAccessToken = data.access_token;
-        const expiresIn = data.expires_in; // seconds
-        
-        setUserToken(newAccessToken);
-        setTokenExpiry(Date.now() + (expiresIn * 1000));
-        setSyncStatus('idle');
-        return newAccessToken;
-      } catch (e) {
-        console.error("Token refresh failed", e);
-        setSyncStatus('error');
-        // Optional: Logout if refresh completely fails
-        // setRefreshToken(null); 
-        // setUserToken(null);
-        return null;
-      }
-    }
-    return null;
-  };
-
-  // Auto-save to Drive when data changes (debounced)
-  useEffect(() => {
-    if (!refreshToken && !userToken) return;
-    if (!driveFileId && syncStatus !== 'idle') return;
-
-    const saveData = async () => {
-      const validToken = await getValidAccessToken();
-      if (!validToken || !driveFileId) return;
-
-      setSyncStatus('syncing');
-      try {
-        const payload = {
-            version: 1,
-            timestamp: Date.now(),
-            settings,
-            currency,
-            transactions,
-            budgets,
-            incomeCategories,
-            expenseCategories
-        };
-        await updateAppDataFile(validToken, driveFileId, payload);
-        setSyncStatus('success');
-        setLastSyncTime(Date.now());
-        setTimeout(() => setSyncStatus('idle'), 2000);
-      } catch (e) {
-        console.error("Auto-save failed", e);
-        setSyncStatus('error');
-        addNotification("Auto-backup failed. Check connection.", "error");
-      }
-    };
-
-    const timer = setTimeout(saveData, 3000); // 3-second debounce
-    return () => clearTimeout(timer);
-  }, [transactions, budgets, settings, currency, incomeCategories, expenseCategories, refreshToken, driveFileId]);
-
-
-  const handleGoogleLogin = () => {
-    if (!window.google) {
-      addNotification("Google Services not ready. Refresh page.", "error");
-      return;
-    }
+  // --- FIREBASE AUTH HANDLERS ---
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
 
     try {
-      // Use initCodeClient for Authorization Code Flow (Backend Exchange)
-      const client = window.google.accounts.oauth2.initCodeClient({
-        client_id: GOOGLE_CLIENT_ID,
-        // CRITICAL: Using drive.file scope prevents "Access Blocked" / "Policy Violation" errors
-        // This scope only allows access to files created by THIS app, not the user's whole drive.
-        scope: 'https://www.googleapis.com/auth/drive.file',
-        ux_mode: 'popup',
-        callback: async (response: any) => {
-          if (response.code) {
-            setSyncStatus('syncing');
-            setIsSyncing(true);
-            try {
-               // Exchange code for tokens via Netlify Function
-               const tokenRes = await fetch('/.netlify/functions/auth', {
-                 method: 'POST',
-                 body: JSON.stringify({ code: response.code })
-               });
-               
-               if (!tokenRes.ok) throw new Error('Token exchange failed');
-               
-               const tokenData = await tokenRes.json();
-               const { access_token, refresh_token, expires_in } = tokenData;
+      if (authMode === 'signin') {
+        // Sign In Logic
+        const userCredential = await auth.signInWithEmailAndPassword(authEmail, authPassword);
+        const user = userCredential.user;
 
-               // Update State
-               setUserToken(access_token);
-               if (refresh_token) setRefreshToken(refresh_token);
-               setTokenExpiry(Date.now() + (expires_in * 1000));
+        if (user && !user.emailVerified) {
+           await auth.signOut();
+           setVerificationEmail(user.email || '');
+           setVerificationRequired(true);
+           setAuthLoading(false);
+           return;
+        }
 
-               // 1. Look for existing file
-               const existingFile = await findAppDataFile(access_token);
-               
-               if (existingFile) {
-                 // 2a. Found: Download and merge
-                 setDriveFileId(existingFile.id);
-                 const cloudData = await downloadAppData(access_token, existingFile.id);
-                 
-                 if (cloudData) {
-                    if (confirm("Found backup in Google Drive. Load it?")) {
-                        if (cloudData.transactions) setTransactions(cloudData.transactions);
-                        if (cloudData.budgets) setBudgets(cloudData.budgets);
-                        if (cloudData.settings) setSettings(cloudData.settings);
-                        if (cloudData.currency) setCurrency(cloudData.currency);
-                        if (cloudData.incomeCategories) setIncomeCategories(cloudData.incomeCategories);
-                        if (cloudData.expenseCategories) setExpenseCategories(cloudData.expenseCategories);
-                        addNotification("Data restored from Drive", "success");
-                    }
-                 }
-               } else {
-                 // 2b. Not Found: Create new file
-                 const payload = {
-                   version: 1,
-                   timestamp: Date.now(),
-                   settings,
-                   currency,
-                   transactions,
-                   budgets,
-                   incomeCategories,
-                   expenseCategories
-                 };
-                 const newFile = await createAppDataFile(access_token, payload);
-                 setDriveFileId(newFile.id);
-                 addNotification("Drive backup created", "success");
-               }
-               setSyncStatus('success');
-               setLastSyncTime(Date.now());
-            } catch (error) {
-              console.error("Sync init failed", error);
-              setSyncStatus('error');
-              addNotification("Failed to sync with Drive", "error");
-            } finally {
-              setIsSyncing(false);
-            }
-          }
-        },
-      });
-      client.requestCode();
-    } catch (e: any) {
-        console.error("Code Client Init Error", e);
-        addNotification("Auth Init Error", "error");
+        addNotification('Signed in successfully', 'success');
+        setShowAuthModal(false);
+      } else {
+        // Sign Up Logic
+        const userCredential = await auth.createUserWithEmailAndPassword(authEmail, authPassword);
+        const user = userCredential.user;
+        
+        // Send Verification
+        if (user) {
+          await user.sendEmailVerification();
+        }
+        
+        // Sign out immediately to enforce verification
+        await auth.signOut();
+        
+        setVerificationEmail(user?.email || '');
+        setVerificationRequired(true); // Show verification screen
+        addNotification('Verification email sent', 'info');
+      }
+    } catch (error: any) {
+      console.error("Auth Error", error.code);
+      if (authMode === 'signin') {
+        if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+          setAuthError('Email or password is incorrect');
+        } else {
+          setAuthError('Failed to sign in. Please try again.');
+        }
+      } else {
+        if (error.code === 'auth/email-already-in-use') {
+          setAuthError('User already exists. Please sign in');
+        } else {
+          setAuthError('Failed to create account. Please try again.');
+        }
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleGoogleAuth = async () => {
+    setAuthLoading(true);
+    setAuthError('');
+    const provider = new firebase.auth.GoogleAuthProvider();
+    try {
+      await auth.signInWithPopup(provider);
+      addNotification('Signed in with Google', 'success');
+      setShowAuthModal(false);
+    } catch (error: any) {
+      console.error("Google Auth Error", error);
+      setAuthError('Google Sign-In failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await auth.signOut();
+      setFirebaseUser(null);
+      addNotification('Signed out successfully', 'info');
+    } catch (error) {
+      console.error("Sign Out Error", error);
     }
   };
 
@@ -699,6 +690,13 @@ const App: React.FC = () => {
     return `${currency.symbol} ${val.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   };
 
+  // Toggle privacy and update settings to persist it
+  const handleTogglePrivacy = () => {
+    const newState = !hideBalances;
+    setHideBalances(newState);
+    setSettings(prev => ({...prev, stealthMode: newState}));
+  };
+
   useEffect(() => {
     if (!isOnboarded || transactions.length === 0 || !isAiAuthorized) return;
     const fetchInsights = async () => {
@@ -787,25 +785,11 @@ const App: React.FC = () => {
           </div>
           <button onClick={() => setShowSettings(true)} className="text-slate-400 hover:text-indigo-600 transition-colors p-1 relative">
             <SettingsIcon size={22}/>
-            {syncStatus === 'error' && <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full"></span>}
           </button>
         </div>
       </header>
 
       <main className="px-6 pt-6 space-y-6 flex-1 overflow-y-auto no-scrollbar">
-        {/* SYNC STATUS BANNER (Only if connected) */}
-        {(refreshToken || userToken) && (
-            <div className={`flex items-center justify-between px-4 py-2 rounded-2xl text-[10px] font-bold uppercase tracking-widest transition-all ${syncStatus === 'error' ? 'bg-red-50 text-red-600' : 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600'}`}>
-               <div className="flex items-center space-x-2">
-                  {syncStatus === 'syncing' ? <RefreshCw size={12} className="animate-spin" /> : <CloudLightning size={12} />}
-                  <span>{syncStatus === 'syncing' ? 'Syncing...' : syncStatus === 'error' ? 'Sync Error' : 'Drive Connected'}</span>
-               </div>
-               {lastSyncTime && syncStatus !== 'syncing' && (
-                   <span className="opacity-50">{new Date(lastSyncTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-               )}
-            </div>
-        )}
-
         {activeTab === 'home' && (
           <div className="space-y-6 animate-in fade-in duration-500 pb-12">
             {/* Balance Card */}
@@ -815,7 +799,7 @@ const App: React.FC = () => {
                 <p className="text-indigo-200 text-[10px] font-black uppercase tracking-[0.2em] opacity-60">
                   {settings.enableRollover ? 'Net Financial Position' : 'Monthly Cashflow'}
                 </p>
-                <button onClick={() => setHideBalances(!hideBalances)} className="p-1.5 bg-white/10 rounded-full hover:bg-white/20 transition-all">
+                <button onClick={handleTogglePrivacy} className="p-1.5 bg-white/10 rounded-full hover:bg-white/20 transition-all">
                   {hideBalances ? <EyeOff size={14} /> : <Eye size={14} />}
                 </button>
               </div>
@@ -895,7 +879,7 @@ const App: React.FC = () => {
                 <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Live Activity</h3>
               </div>
               {recentTransactions.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 bg-white dark:bg-slate-900 rounded-[2rem] border border-dashed border-slate-200 dark:border-slate-800">
+                <div className="flex flex-col items-center justify-center py-12 bg-white dark:bg-slate-900 rounded-[2rem] border border-dashed border-slate-200 dark:border-slate-700">
                   <Clock className="text-slate-300 dark:text-slate-700 mb-2" size={32} />
                   <p className="text-[11px] text-slate-400 italic">Financial logs are empty for today.</p>
                 </div>
@@ -1049,7 +1033,7 @@ const App: React.FC = () => {
            </div>
         )}
 
-        {/* Tab: Limits (Converted from Modal) */}
+        {/* Tab: Limits */}
         {activeTab === 'limits' && (
            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
                <div className="flex flex-col space-y-4">
@@ -1173,6 +1157,44 @@ const App: React.FC = () => {
                 <button onClick={() => setShowSettings(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
               </div>
 
+               {/* ACCOUNT & FIREBASE AUTH */}
+               <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-indigo-500 mb-2">
+                   <UserIcon size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Luxe Account</h3>
+                 </div>
+                 
+                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
+                   {firebaseUser ? (
+                     <div className="space-y-4">
+                       <div className="flex items-center space-x-4">
+                         {firebaseUser.photoURL ? (
+                           <img src={firebaseUser.photoURL} alt="Profile" className="w-12 h-12 rounded-full border-2 border-indigo-500" />
+                         ) : (
+                           <div className="w-12 h-12 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
+                             <UserIcon size={24} />
+                           </div>
+                         )}
+                         <div className="flex-1 min-w-0">
+                           <p className="font-bold text-sm truncate">{firebaseUser.displayName || 'Luxe User'}</p>
+                           <p className="text-[10px] text-slate-400 font-medium truncate">{firebaseUser.email}</p>
+                         </div>
+                         <div className="px-3 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 rounded-full text-[9px] font-black uppercase tracking-widest">
+                           Verified
+                         </div>
+                       </div>
+                     </div>
+                   ) : (
+                     <div className="space-y-4 text-center py-4">
+                        <div className="w-16 h-16 bg-indigo-50 dark:bg-indigo-900/20 rounded-full flex items-center justify-center mx-auto text-indigo-500 mb-2">
+                            <Lock size={24} />
+                        </div>
+                        <p className="text-xs font-bold text-slate-500">Log in to sync your data securely across all your devices.</p>
+                     </div>
+                   )}
+                 </div>
+               </section>
+
                {/* Intelligence Section (API Key) */}
                <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-indigo-500 mb-2">
@@ -1212,49 +1234,22 @@ const App: React.FC = () => {
                   </div>
               </section>
 
-              {/* Cloud Sync Section - Google Drive */}
+              {/* User Info (Moved Up) */}
               <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                   <Cloud size={16} />
-                   <h3 className="text-[10px] font-black uppercase tracking-widest">Cloud Sync</h3>
+                   <UserIcon size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Profile</h3>
                  </div>
                  <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                    {(refreshToken || userToken) ? (
-                        <div className="space-y-4">
-                            <div className="flex items-center space-x-3 text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 p-4 rounded-2xl">
-                                <CheckCircle2 size={24} />
-                                <div>
-                                    <p className="font-bold text-sm">Synced with Drive</p>
-                                    <p className="text-[10px] opacity-70">Data is automatically backed up.</p>
-                                </div>
-                            </div>
-                            <button 
-                                onClick={() => {
-                                    if(confirm("Log out of Drive? Local data will remain.")) {
-                                        setUserToken(null);
-                                        setRefreshToken(null);
-                                        setDriveFileId(null);
-                                    }
-                                }}
-                                className="w-full py-3 bg-slate-100 dark:bg-slate-800 text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                            >
-                                Disconnect
-                            </button>
-                        </div>
-                    ) : (
-                        <div className="space-y-4">
-                            <p className="text-xs font-medium text-slate-500 leading-relaxed">
-                                Connect Google Drive to sync your financial data across devices for free.
-                            </p>
-                            <button 
-                                onClick={handleGoogleLogin}
-                                className="w-full bg-slate-900 dark:bg-white dark:text-slate-900 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center space-x-2 shadow-lg active:scale-95 transition-all"
-                            >
-                                <CloudLightning size={16} />
-                                <span>Connect Google Drive</span>
-                            </button>
-                        </div>
-                    )}
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-black uppercase text-slate-400 ml-2">Display Name</label>
+                      <input 
+                        type="text" 
+                        value={settings.userName} 
+                        onChange={(e) => setSettings({...settings, userName: e.target.value})}
+                        className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl px-4 py-3 font-bold"
+                      />
+                    </div>
                  </div>
               </section>
 
@@ -1303,25 +1298,6 @@ const App: React.FC = () => {
                  </div>
               </section>
 
-              {/* User Info */}
-              <section className="space-y-4">
-                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                   <User size={16} />
-                   <h3 className="text-[10px] font-black uppercase tracking-widest">Profile</h3>
-                 </div>
-                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-black uppercase text-slate-400 ml-2">Display Name</label>
-                      <input 
-                        type="text" 
-                        value={settings.userName} 
-                        onChange={(e) => setSettings({...settings, userName: e.target.value})}
-                        className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl px-4 py-3 font-bold"
-                      />
-                    </div>
-                 </div>
-              </section>
-
               {/* Preferences */}
               <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-slate-400 mb-2">
@@ -1353,8 +1329,141 @@ const App: React.FC = () => {
                     </div>
                  </div>
               </section>
+
+              {/* LOGIN / LOGOUT BUTTON (BOTTOM OF SETTINGS) */}
+              <div className="pt-4">
+                {firebaseUser ? (
+                  <button 
+                    onClick={handleSignOut}
+                    className="w-full bg-rose-500 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2"
+                  >
+                    <LogOut size={20} />
+                    <span className="uppercase tracking-widest">Log Out</span>
+                  </button>
+                ) : (
+                  <button 
+                    onClick={() => { setShowAuthModal(true); setAuthMode('signin'); setAuthError(''); setVerificationRequired(false); }}
+                    className="w-full bg-indigo-600 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2"
+                  >
+                    <LogIn size={20} />
+                    <span className="uppercase tracking-widest">Log In / Sign Up</span>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Auth Modal */}
+      {showAuthModal && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+           <div className="bg-white dark:bg-slate-950 w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl relative border border-white/20">
+               <button 
+                 onClick={() => {
+                   if (!verificationRequired) setShowAuthModal(false);
+                 }} 
+                 className={`absolute top-6 right-6 p-2 rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${verificationRequired ? 'hidden' : ''}`}
+               >
+                 <X size={24} />
+               </button>
+
+               {verificationRequired ? (
+                 <div className="text-center space-y-6 py-6">
+                    <div className="w-20 h-20 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4 animate-bounce">
+                      <Mail size={32} />
+                    </div>
+                    <h3 className="text-2xl font-black tracking-tight">Verify Your Email</h3>
+                    <p className="text-sm text-slate-500 font-medium leading-relaxed">
+                      We have sent a verification email to <br/>
+                      <span className="font-bold text-slate-800 dark:text-white">{verificationEmail}</span>
+                    </p>
+                    <p className="text-xs text-slate-400">Please verify it and log in again to secure your account.</p>
+                    <button 
+                      onClick={() => { setVerificationRequired(false); setAuthMode('signin'); }}
+                      className="w-full bg-slate-900 dark:bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest"
+                    >
+                      Back to Login
+                    </button>
+                 </div>
+               ) : (
+                 <div className="space-y-6">
+                    <div className="text-center mb-8">
+                       <h3 className="text-2xl font-black tracking-tight">{authMode === 'signin' ? 'Welcome Back' : 'Join Luxe Ledger'}</h3>
+                       <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-2">Secure Cloud Sync</p>
+                    </div>
+
+                    <div className="flex gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl">
+                        <button 
+                          onClick={() => { setAuthMode('signin'); setAuthError(''); }}
+                          className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signin' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}
+                        >
+                          Sign In
+                        </button>
+                        <button 
+                          onClick={() => { setAuthMode('signup'); setAuthError(''); }}
+                          className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signup' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}
+                        >
+                          Sign Up
+                        </button>
+                    </div>
+
+                    {authError && (
+                      <div className="p-4 bg-rose-50 dark:bg-rose-950/30 border border-rose-100 dark:border-rose-900/50 text-rose-600 dark:text-rose-400 rounded-2xl flex items-center gap-3 text-xs font-bold animate-in slide-in-from-top-2">
+                        <AlertCircle size={16} />
+                        <span>{authError}</span>
+                      </div>
+                    )}
+
+                    <form onSubmit={handleEmailAuth} className="space-y-4">
+                        <div className="relative group">
+                          <Mail className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} />
+                          <input 
+                            type="email" 
+                            value={authEmail}
+                            onChange={(e) => setAuthEmail(e.target.value)}
+                            placeholder="Email Address"
+                            className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all"
+                            required
+                          />
+                        </div>
+                        <div className="relative group">
+                          <Lock className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} />
+                          <input 
+                            type="password" 
+                            value={authPassword}
+                            onChange={(e) => setAuthPassword(e.target.value)}
+                            placeholder="Password"
+                            className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all"
+                            required
+                          />
+                        </div>
+                        <button 
+                          type="submit" 
+                          disabled={authLoading}
+                          className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {authLoading ? <Loader2 size={18} className="animate-spin mx-auto" /> : (authMode === 'signin' ? 'Log In' : 'Create Account')}
+                        </button>
+                    </form>
+
+                    <div className="flex items-center gap-4">
+                      <div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div>
+                      <span className="text-[9px] text-slate-300 font-black uppercase">OR</span>
+                      <div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div>
+                    </div>
+
+                    <button 
+                      onClick={handleGoogleAuth}
+                      disabled={authLoading}
+                      className="w-full bg-white dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-800 py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all active:scale-95"
+                    >
+                      <Chrome size={18} className="text-indigo-600" />
+                      <span>Continue with Google</span>
+                    </button>
+                 </div>
+               )}
+           </div>
         </div>
       )}
 
