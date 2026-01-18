@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   Plus, 
@@ -216,7 +215,6 @@ const App: React.FC = () => {
                if (data?.budgets) setBudgets(data.budgets);
                if (data?.settings) {
                  setSettings(data.settings);
-                 // Update local state if it differs from cloud
                  setHideBalances(data.settings.stealthMode);
                }
                if (data?.currency) setCurrency(data.currency);
@@ -1195,6 +1193,25 @@ const App: React.FC = () => {
                  </div>
                </section>
 
+               {/* User Info (Moved Up) */}
+               <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
+                   <UserIcon size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Profile</h3>
+                 </div>
+                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-black uppercase text-slate-400 ml-2">Display Name</label>
+                      <input 
+                        type="text" 
+                        value={settings.userName} 
+                        onChange={(e) => setSettings({...settings, userName: e.target.value})}
+                        className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl px-4 py-3 font-bold"
+                      />
+                    </div>
+                 </div>
+               </section>
+
                {/* Intelligence Section (API Key) */}
                <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-indigo-500 mb-2">
@@ -1232,25 +1249,6 @@ const App: React.FC = () => {
                         <ExternalLink size={10} />
                      </a>
                   </div>
-              </section>
-
-              {/* User Info (Moved Up) */}
-              <section className="space-y-4">
-                 <div className="flex items-center space-x-2 text-slate-400 mb-2">
-                   <UserIcon size={16} />
-                   <h3 className="text-[10px] font-black uppercase tracking-widest">Profile</h3>
-                 </div>
-                 <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-black uppercase text-slate-400 ml-2">Display Name</label>
-                      <input 
-                        type="text" 
-                        value={settings.userName} 
-                        onChange={(e) => setSettings({...settings, userName: e.target.value})}
-                        className="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-2xl px-4 py-3 font-bold"
-                      />
-                    </div>
-                 </div>
               </section>
 
               {/* Data Import / Export */}
