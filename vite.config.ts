@@ -7,8 +7,22 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     define: {
-      // Polyfill process.env for the Google GenAI SDK and existing code
       'process.env': env
+    },
+    build: {
+      rollupOptions: {
+        // Treat @google/genai as external (do not bundle)
+        external: ['@google/genai'],
+        output: {
+          globals: {
+            '@google/genai': 'GoogleGenAI'
+          }
+        }
+      }
+    },
+    optimizeDeps: {
+      // Exclude from pre-bundling in dev mode
+      exclude: ['@google/genai']
     }
   };
 });
