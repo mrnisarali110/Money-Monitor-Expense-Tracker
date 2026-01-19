@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   Plus, 
@@ -35,7 +36,8 @@ import {
   ExternalLink,
   Mail,
   Chrome,
-  LogIn
+  LogIn,
+  Trash2
 } from 'lucide-react';
 import { 
   Transaction, 
@@ -53,6 +55,8 @@ import {
   COMMON_EMOJIS
 } from './constants';
 import { PremiumChart } from './components/PremiumChart';
+import { PremiumBarChart } from './components/PremiumBarChart';
+import { OnboardingFlow } from './components/OnboardingFlow';
 import { getFinancialInsights, parseNaturalLanguageTransaction } from './services/geminiService';
 import { auth, db } from './firebaseConfig';
 import firebase from 'firebase/compat/app';
@@ -149,6 +153,7 @@ const App: React.FC = () => {
   // --- UI & Utility State ---
   const [currentDate, setCurrentDate] = useState(new Date());
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   
   const [insights, setInsights] = useState<string>('Analyzing your wealth...');
   const [loadingInsights, setLoadingInsights] = useState(false);
@@ -207,6 +212,9 @@ const App: React.FC = () => {
           setFirebaseUser(user);
           setVerificationRequired(false);
           setShowAuthModal(false);
+
+          // Auto-onboard if logged in
+          if (!isOnboarded) setIsOnboarded(true);
 
           // --- FIRESTORE SYNC: LOAD DATA ---
           try {
@@ -314,6 +322,7 @@ const App: React.FC = () => {
 
         addNotification('Signed in successfully', 'success');
         setShowAuthModal(false);
+        setIsOnboarded(true); // Complete onboarding
       } else {
         // Sign Up Logic
         const userCredential = await auth.createUserWithEmailAndPassword(authEmail, authPassword);
@@ -359,6 +368,7 @@ const App: React.FC = () => {
       await auth.signInWithPopup(provider);
       addNotification('Signed in with Google', 'success');
       setShowAuthModal(false);
+      setIsOnboarded(true); // Complete onboarding
     } catch (error: any) {
       console.error("Google Auth Error", error);
       setAuthError('Google Sign-In failed');
@@ -525,6 +535,11 @@ const App: React.FC = () => {
     );
 
     if (parsed && parsed.amount > 0) {
+      // Check for budget overrun on magic add
+      if (parsed.type === 'expense') {
+        checkBudgetAlert(parsed.category, parsed.amount);
+      }
+
       const transaction: Transaction = {
         id: Math.random().toString(36).substr(2, 9),
         type: parsed.type as TransactionType,
@@ -627,14 +642,43 @@ const App: React.FC = () => {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const checkBudgetAlert = (categoryName: string, amountToAdd: number) => {
+    const budget = budgets.find(b => b.categoryName === categoryName);
+    if (!budget || budget.limit <= 0) return;
+
+    const currentSpent = transactions
+      .filter(t => t.category === categoryName && t.type === 'expense')
+      .filter(t => {
+        // Only check current period (month usually)
+        const d = new Date(t.date);
+        return d >= currentPeriod.start && d <= currentPeriod.end;
+      })
+      .reduce((sum, t) => sum + t.amount, 0);
+
+    // If editing, we should conceptually subtract the old amount first, 
+    // but the logic here handles the 'new total' prediction.
+    // For simplicity, we just warn if (spent + new) > limit
+    if (currentSpent + amountToAdd > budget.limit) {
+      addNotification(`Alert: ${categoryName} budget exceeded!`, "error");
+    }
+  };
+
   const handleSaveTransaction = () => {
     if (!newAmount || !newCategory) return;
+    const amountVal = parseFloat(newAmount);
+
+    if (newType === 'expense') {
+      // Correct for editing: if editing, subtract old amount from check? 
+      // Simplified: Just check against current + new.
+      checkBudgetAlert(newCategory, amountVal);
+    }
+
     if (editingTransactionId) {
       setTransactions(prev => prev.map(t => t.id === editingTransactionId ? {
         ...t,
         type: newType,
         category: newCategory,
-        amount: parseFloat(newAmount),
+        amount: amountVal,
         note: newNote,
       } : t));
       addNotification("Transaction Updated", "success");
@@ -643,7 +687,7 @@ const App: React.FC = () => {
         id: Math.random().toString(36).substr(2, 9),
         type: newType,
         category: newCategory,
-        amount: parseFloat(newAmount),
+        amount: amountVal,
         date: new Date().toISOString().split('T')[0],
         note: newNote,
         timestamp: Date.now()
@@ -651,6 +695,14 @@ const App: React.FC = () => {
       setTransactions(prev => [transaction, ...prev]);
       addNotification("Transaction Added", "success");
     }
+    setShowAddModal(false);
+    resetForm();
+  };
+
+  const handleDeleteTransaction = () => {
+    if (!editingTransactionId) return;
+    setTransactions(prev => prev.filter(t => t.id !== editingTransactionId));
+    addNotification("Transaction Deleted", "info");
     setShowAddModal(false);
     resetForm();
   };
@@ -687,6 +739,7 @@ const App: React.FC = () => {
     setIsCreatingCategory(false);
     setNewCustomCategoryName('');
     setEditingTransactionId(null);
+    setShowDeleteConfirm(false);
   };
 
   const formatPrice = (val: number) => {
@@ -729,33 +782,8 @@ const App: React.FC = () => {
     return { limit, spent };
   };
 
-  if (!isOnboarded) {
-    return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-8 text-center transition-colors">
-        <div className="w-24 h-24 bg-indigo-600 rounded-[2.5rem] flex items-center justify-center shadow-2xl mb-8 animate-pulse">
-          <Wallet className="text-white" size={48} />
-        </div>
-        <h1 className="text-4xl font-black text-slate-800 dark:text-white mb-4 tracking-tighter">LUXE LEDGER</h1>
-        <p className="text-slate-500 dark:text-slate-400 mb-12 max-w-xs leading-relaxed text-sm font-medium">
-          Premium wealth tracking. Select your primary currency to begin.
-        </p>
-        <div className="w-full max-w-sm space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            {CURRENCIES.map(curr => (
-              <button key={curr.code} onClick={() => setCurrency(curr)} className={`p-4 rounded-3xl border-2 transition-all flex flex-col items-center ${currency.code === curr.code ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300' : 'border-white dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-400 shadow-sm'}`}>
-                <span className="text-2xl font-black">{curr.symbol}</span>
-                <span className="text-[10px] font-bold uppercase tracking-widest">{curr.name}</span>
-              </button>
-            ))}
-          </div>
-          <button onClick={() => setIsOnboarded(true)} className="w-full mt-8 bg-slate-900 dark:bg-indigo-600 text-white py-5 rounded-full font-black text-lg shadow-2xl active:scale-95">CONTINUE</button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className={`min-h-screen pb-24 flex flex-col max-w-lg mx-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors relative overflow-x-hidden ${settings.theme}`}>
+    <div className={`min-h-screen flex flex-col max-w-lg mx-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors relative overflow-x-hidden ${settings.theme}`}>
       {/* Toast Notifications */}
       <div className="fixed top-4 right-4 z-[70] flex flex-col items-end space-y-2 pointer-events-none px-4">
         {notifications.map(n => (
@@ -775,381 +803,399 @@ const App: React.FC = () => {
         ))}
       </div>
 
-      {/* Header */}
-      <header className="sticky top-0 z-20 glass dark:bg-slate-900/80 px-6 py-4 flex items-center justify-between premium-shadow">
-        <div className="flex items-center space-x-2">
-           <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg"><Wallet size={16} className="text-white" /></div>
-           <h1 className="text-lg font-black tracking-tighter">LUXE</h1>
-        </div>
-        <div className="flex items-center space-x-3">
-          <div className="flex items-center space-x-2 bg-slate-100 dark:bg-slate-800 rounded-full px-3 py-1">
-            <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth()-1)))} className="p-1"><ChevronLeft size={16} /></button>
-            <span className="text-[9px] font-black w-24 text-center uppercase tracking-widest truncate">{MONTHS[currentDate.getMonth()]} '{currentDate.getFullYear().toString().slice(-2)}</span>
-            <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth()+1)))} className="p-1"><ChevronRight size={16} /></button>
-          </div>
-          <button onClick={() => setShowSettings(true)} className="text-slate-400 hover:text-indigo-600 transition-colors p-1 relative">
-            <SettingsIcon size={22}/>
-          </button>
-        </div>
-      </header>
-
-      <main className="px-6 pt-6 space-y-6 flex-1 overflow-y-auto no-scrollbar">
-        {activeTab === 'home' && (
-          <div className="space-y-6 animate-in fade-in duration-500 pb-12">
-            {/* Balance Card */}
-            <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-[2.5rem] p-8 text-white premium-shadow relative overflow-hidden group">
-              <div className="absolute top-[-20%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl group-hover:bg-indigo-500/30 transition-all"></div>
-              <div className="flex justify-between items-start mb-2">
-                <p className="text-indigo-200 text-[10px] font-black uppercase tracking-[0.2em] opacity-60">
-                  {settings.enableRollover ? 'Net Financial Position' : 'Monthly Cashflow'}
-                </p>
-                <button onClick={handleTogglePrivacy} className="p-1.5 bg-white/10 rounded-full hover:bg-white/20 transition-all">
-                  {hideBalances ? <EyeOff size={14} /> : <Eye size={14} />}
-                </button>
-              </div>
-              <h2 className="text-5xl font-black tracking-tighter transition-all">
-                {formatPrice(settings.enableRollover ? totalHistoricalBalance : (periodStats.income - periodStats.expense))}
-              </h2>
-              <div className="flex mt-8 space-x-3">
-                <div className="flex-1 bg-white/5 backdrop-blur-md rounded-2xl p-4 border border-white/10">
-                  <TrendingUp size={14} className="text-emerald-400 mb-1" />
-                  <p className="text-[9px] text-white/40 font-black uppercase tracking-widest">Inflow</p>
-                  <p className="text-md font-bold">{formatPrice(periodStats.income)}</p>
-                </div>
-                <div className="flex-1 bg-white/5 backdrop-blur-md rounded-2xl p-4 border border-white/10">
-                  <TrendingDown size={14} className="text-rose-400 mb-1" />
-                  <p className="text-[9px] text-white/40 font-black uppercase tracking-widest">Outflow</p>
-                  <p className="text-md font-bold">{formatPrice(periodStats.expense)}</p>
-                </div>
-              </div>
+      {!isOnboarded ? (
+        <OnboardingFlow 
+          onComplete={() => setIsOnboarded(true)} 
+          currency={currency} 
+          setCurrency={setCurrency}
+          onOpenAuth={(mode) => { setAuthMode(mode); setShowAuthModal(true); }}
+        />
+      ) : (
+        <>
+          {/* Header */}
+          <header className="sticky top-0 z-20 glass dark:bg-slate-900/80 px-6 py-4 flex items-center justify-between premium-shadow">
+            <div className="flex items-center space-x-2">
+              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg"><Wallet size={16} className="text-white" /></div>
+              <h1 className="text-lg font-black tracking-tighter">LUXE</h1>
             </div>
-
-            {/* Magic Entry Bar */}
-            <div className="relative group">
-              <form onSubmit={handleMagicSubmit} className="relative">
-                <div className="absolute left-5 top-1/2 -translate-y-1/2 text-indigo-500">
-                  {isMagicParsing ? <Sparkles size={18} className="animate-spin" /> : <MessageSquare size={18} />}
-                </div>
-                <input 
-                  type="text" 
-                  value={magicText}
-                  onChange={(e) => setMagicText(e.target.value)}
-                  placeholder="Magic add: 'Spent 50 on dinner'..."
-                  disabled={!isAiAuthorized}
-                  className="w-full bg-white dark:bg-slate-900 pl-12 pr-12 py-5 rounded-3xl border border-slate-100 dark:border-slate-800 focus:ring-2 focus:ring-indigo-500 text-sm font-bold premium-shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed"
-                />
-                <button 
-                  type="submit" 
-                  disabled={!isAiAuthorized}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 bg-slate-900 dark:bg-indigo-600 text-white p-2 rounded-xl active:scale-90 transition-all disabled:opacity-50"
-                >
-                  <Zap size={14} />
-                </button>
-              </form>
-            </div>
-
-            {/* Daily Momentum */}
-            <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800">
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Weekly Velocity</h3>
-                <div className="flex items-center space-x-1 text-emerald-500 font-bold text-[10px]">
-                  <TrendingUp size={12} />
-                  <span>OPTIMAL</span>
-                </div>
+            <div className="flex items-center space-x-3">
+              <div className="flex items-center space-x-2 bg-slate-100 dark:bg-slate-800 rounded-full px-3 py-1">
+                <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth()-1)))} className="p-1"><ChevronLeft size={16} /></button>
+                <span className="text-[9px] font-black w-24 text-center uppercase tracking-widest truncate">{MONTHS[currentDate.getMonth()]} '{currentDate.getFullYear().toString().slice(-2)}</span>
+                <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth()+1)))} className="p-1"><ChevronRight size={16} /></button>
               </div>
-              <div className="flex items-end justify-between h-20 px-2">
-                {dailyActivity.map((val, i) => {
-                  const max = Math.max(...dailyActivity, 1);
-                  const height = (val / max) * 100;
-                  return (
-                    <div key={i} className="flex flex-col items-center group w-full">
-                       <div 
-                         className="w-2 bg-indigo-500/10 dark:bg-indigo-500/20 rounded-full h-16 relative overflow-hidden"
-                       >
-                         <div 
-                           className="absolute bottom-0 left-0 right-0 bg-indigo-600 rounded-full transition-all duration-1000" 
-                           style={{ height: `${height}%` }}
-                         ></div>
-                       </div>
+              <button onClick={() => setShowSettings(true)} className="text-slate-400 hover:text-indigo-600 transition-colors p-1 relative">
+                <SettingsIcon size={22}/>
+              </button>
+            </div>
+          </header>
+
+          <main className="px-6 pt-6 space-y-6 flex-1 overflow-y-auto no-scrollbar pb-24">
+            {activeTab === 'home' && (
+              <div className="space-y-6 animate-in fade-in duration-500 pb-12">
+                {/* Balance Card */}
+                <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-[2.5rem] p-8 text-white premium-shadow relative overflow-hidden group">
+                  <div className="absolute top-[-20%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl group-hover:bg-indigo-500/30 transition-all"></div>
+                  <div className="flex justify-between items-start mb-2">
+                    <p className="text-indigo-200 text-[10px] font-black uppercase tracking-[0.2em] opacity-60">
+                      {settings.enableRollover ? 'Net Financial Position' : 'Monthly Cashflow'}
+                    </p>
+                    <button onClick={handleTogglePrivacy} className="p-1.5 bg-white/10 rounded-full hover:bg-white/20 transition-all">
+                      {hideBalances ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                  <h2 className="text-5xl font-black tracking-tighter transition-all">
+                    {formatPrice(settings.enableRollover ? totalHistoricalBalance : (periodStats.income - periodStats.expense))}
+                  </h2>
+                  <div className="flex mt-8 space-x-3">
+                    <div className="flex-1 bg-white/5 backdrop-blur-md rounded-2xl p-4 border border-white/10">
+                      <TrendingUp size={14} className="text-emerald-400 mb-1" />
+                      <p className="text-[9px] text-white/40 font-black uppercase tracking-widest">Inflow</p>
+                      <p className="text-md font-bold">{formatPrice(periodStats.income)}</p>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Recently Added */}
-            <div className="space-y-3">
-              <div className="flex justify-between items-center px-1">
-                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Live Activity</h3>
-              </div>
-              {recentTransactions.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 bg-white dark:bg-slate-900 rounded-[2rem] border border-dashed border-slate-200 dark:border-slate-700">
-                  <Clock className="text-slate-300 dark:text-slate-700 mb-2" size={32} />
-                  <p className="text-[11px] text-slate-400 italic">Financial logs are empty for today.</p>
+                    <div className="flex-1 bg-white/5 backdrop-blur-md rounded-2xl p-4 border border-white/10">
+                      <TrendingDown size={14} className="text-rose-400 mb-1" />
+                      <p className="text-[9px] text-white/40 font-black uppercase tracking-widest">Outflow</p>
+                      <p className="text-md font-bold">{formatPrice(periodStats.expense)}</p>
+                    </div>
+                  </div>
                 </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-2">
-                  {recentTransactions.slice(0, 5).map(t => (
-                    <div key={t.id} onClick={() => handleEditClick(t)} className="bg-white dark:bg-slate-900 p-4 rounded-3xl flex items-center justify-between premium-shadow border border-slate-50 dark:border-slate-800 active:scale-95 transition-all cursor-pointer group">
-                      <div className="flex items-center space-x-3">
-                        <span className="text-xl">{(t.type === 'income' ? incomeCategories : expenseCategories).find(c => c.name === t.category)?.icon || '💸'}</span>
-                        <div>
-                          <p className="font-bold text-[11px]">{t.category}</p>
-                          <p className="text-[9px] text-slate-400 font-bold uppercase">{new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+
+                {/* Magic Entry Bar */}
+                <div className="relative group">
+                  <form onSubmit={handleMagicSubmit} className="relative">
+                    <div className="absolute left-5 top-1/2 -translate-y-1/2 text-indigo-500">
+                      {isMagicParsing ? <Sparkles size={18} className="animate-spin" /> : <MessageSquare size={18} />}
+                    </div>
+                    <input 
+                      type="text" 
+                      value={magicText}
+                      onChange={(e) => setMagicText(e.target.value)}
+                      placeholder="Magic add: 'Spent 50 on dinner'..."
+                      disabled={!isAiAuthorized}
+                      className="w-full bg-white dark:bg-slate-900 pl-12 pr-12 py-5 rounded-3xl border border-slate-100 dark:border-slate-800 focus:ring-2 focus:ring-indigo-500 text-sm font-bold premium-shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                    />
+                    <button 
+                      type="submit" 
+                      disabled={!isAiAuthorized}
+                      className="absolute right-4 top-1/2 -translate-y-1/2 bg-slate-900 dark:bg-indigo-600 text-white p-2 rounded-xl active:scale-90 transition-all disabled:opacity-50"
+                    >
+                      <Zap size={14} />
+                    </button>
+                  </form>
+                </div>
+
+                {/* Daily Momentum */}
+                <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800">
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Weekly Velocity</h3>
+                    <div className="flex items-center space-x-1 text-emerald-500 font-bold text-[10px]">
+                      <TrendingUp size={12} />
+                      <span>OPTIMAL</span>
+                    </div>
+                  </div>
+                  <div className="flex items-end justify-between h-20 px-2">
+                    {dailyActivity.map((val, i) => {
+                      const max = Math.max(...dailyActivity, 1);
+                      const height = (val / max) * 100;
+                      return (
+                        <div key={i} className="flex flex-col items-center group w-full">
+                          <div 
+                            className="w-2 bg-indigo-500/10 dark:bg-indigo-500/20 rounded-full h-16 relative overflow-hidden"
+                          >
+                            <div 
+                              className="absolute bottom-0 left-0 right-0 bg-indigo-600 rounded-full transition-all duration-1000" 
+                              style={{ height: `${height}%` }}
+                            ></div>
+                          </div>
                         </div>
-                      </div>
-                      <p className={`font-black text-[12px] ${t.type === 'income' ? 'text-emerald-500' : 'text-rose-500'}`}>
-                        {t.type === 'income' ? '+' : '-'}{formatPrice(t.amount)}
-                      </p>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Recently Added */}
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center px-1">
+                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Live Activity</h3>
+                  </div>
+                  {recentTransactions.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-12 bg-white dark:bg-slate-900 rounded-[2rem] border border-dashed border-slate-200 dark:border-slate-700">
+                      <Clock className="text-slate-300 dark:text-slate-700 mb-2" size={32} />
+                      <p className="text-[11px] text-slate-400 italic">Financial logs are empty for today.</p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* AI Insights Card */}
-            {isAiAuthorized && (
-              <div className="bg-indigo-600 rounded-[2.5rem] p-7 text-white shadow-xl relative overflow-hidden group">
-                 <div className="absolute -right-8 -bottom-8 w-24 h-24 bg-white/10 rounded-full blur-2xl group-hover:scale-150 transition-transform"></div>
-                 <div className="flex items-center space-x-2 mb-3">
-                    <Sparkles size={16} className="text-indigo-200" />
-                    <h3 className="text-[11px] font-black uppercase tracking-widest">PLATINUM INSIGHTS</h3>
-                 </div>
-                 <p className={`text-[13px] leading-relaxed font-medium ${loadingInsights ? 'opacity-50 animate-pulse' : 'opacity-100'}`}>"{insights}"</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Tab: Journal */}
-        {activeTab === 'journal' && (
-           <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
-             <div className="flex flex-col space-y-4">
-               <h3 className="text-2xl font-black tracking-tight px-1">Ledger Journal</h3>
-               <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
-                 {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
-                   <button key={p} onClick={() => setJournalPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${journalPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
-                 ))}
-               </div>
-             </div>
-             <div className="space-y-4">
-              {journalTransactions.length === 0 ? (
-                <div className="text-center py-24 text-slate-400 space-y-4">
-                   <CalendarDays className="mx-auto opacity-10" size={80} />
-                   <p className="text-xs font-black uppercase tracking-widest">No transaction logs</p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {journalTransactions.map((t, idx) => {
-                    const showDateHeader = idx === 0 || t.date !== journalTransactions[idx - 1].date;
-                    const cat = (t.type === 'income' ? incomeCategories : expenseCategories).find(c => c.name === t.category);
-                    return (
-                      <div key={t.id} className="space-y-2">
-                        {showDateHeader && (
-                          <div className="flex items-center space-x-2 mt-6 first:mt-0 px-2">
-                            <p className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-[0.2em]">
-                              {new Date(t.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-                            </p>
-                            <div className="h-[1px] flex-1 bg-slate-100 dark:bg-slate-800"></div>
-                          </div>
-                        )}
-                        <div onClick={() => handleEditClick(t)} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] flex items-center justify-between premium-shadow border border-slate-50 dark:border-slate-800 active:scale-95 transition-transform cursor-pointer">
-                          <div className="flex items-center space-x-4">
-                            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-xl ${t.type === 'income' ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
-                               {cat?.icon || '📦'}
-                            </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-2">
+                      {recentTransactions.slice(0, 5).map(t => (
+                        <div key={t.id} onClick={() => handleEditClick(t)} className="bg-white dark:bg-slate-900 p-4 rounded-3xl flex items-center justify-between premium-shadow border border-slate-50 dark:border-slate-800 active:scale-95 transition-all cursor-pointer group">
+                          <div className="flex items-center space-x-3">
+                            <span className="text-xl">{(t.type === 'income' ? incomeCategories : expenseCategories).find(c => c.name === t.category)?.icon || '💸'}</span>
                             <div>
-                              <p className="font-bold text-sm">{t.category}</p>
-                              <div className="flex items-center text-[10px] text-slate-400 font-bold space-x-2">
-                                <span className="flex items-center"><Clock size={10} className="mr-1" /> {new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                <span className="italic truncate max-w-[120px]">{t.note || 'No description'}</span>
-                              </div>
+                              <p className="font-bold text-[11px]">{t.category}</p>
+                              <p className="text-[9px] text-slate-400 font-bold uppercase">{new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
                             </div>
                           </div>
-                          <p className={`font-black text-md ${t.type === 'income' ? 'text-emerald-500' : 'text-rose-500'}`}>
+                          <p className={`font-black text-[12px] ${t.type === 'income' ? 'text-emerald-500' : 'text-rose-500'}`}>
                             {t.type === 'income' ? '+' : '-'}{formatPrice(t.amount)}
                           </p>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-             </div>
-           </div>
-        )}
-
-        {/* Tab: Stats */}
-        {activeTab === 'stats' && (
-           <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
-             <div className="flex flex-col space-y-4">
-               <h3 className="text-2xl font-black tracking-tight px-1 text-center">Inflow vs Outflow</h3>
-               <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
-                 {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
-                   <button key={p} onClick={() => setStatsPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${statsPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
-                 ))}
-               </div>
-               <p className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                  Showing Stats for {statsPeriod === 'day' ? 'Selected Day' : statsPeriod === 'week' ? 'Selected Week' : statsPeriod === 'month' ? MONTHS[currentDate.getMonth()] : currentDate.getFullYear()}
-               </p>
-             </div>
-             
-             {/* Stats Cards */}
-             <div className="grid grid-cols-2 gap-3">
-                <div className="bg-emerald-50 dark:bg-emerald-950/20 p-5 rounded-[2rem] border border-emerald-100 dark:border-emerald-900/50">
-                    <div className="flex items-center space-x-2 mb-2 text-emerald-600">
-                        <TrendingUp size={16} />
-                        <span className="text-[9px] font-black uppercase tracking-widest">Income</span>
+                      ))}
                     </div>
-                    <p className="text-xl font-black text-emerald-700 dark:text-emerald-400">{formatPrice(statsTabTotals.income)}</p>
+                  )}
                 </div>
-                <div className="bg-rose-50 dark:bg-rose-950/20 p-5 rounded-[2rem] border border-rose-100 dark:border-rose-900/50">
-                    <div className="flex items-center space-x-2 mb-2 text-rose-600">
-                        <TrendingDown size={16} />
-                        <span className="text-[9px] font-black uppercase tracking-widest">Expense</span>
-                    </div>
-                    <p className="text-xl font-black text-rose-700 dark:text-rose-400">{formatPrice(statsTabTotals.expense)}</p>
-                </div>
-             </div>
 
-             <div className="bg-white dark:bg-slate-900 p-7 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800 flex items-center justify-between">
-                <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Net Savings</p>
-                  <p className={`text-3xl font-black ${statsTabTotals.income >= statsTabTotals.expense ? 'text-slate-800 dark:text-white' : 'text-rose-500'}`}>
-                      {formatPrice(statsTabTotals.income - statsTabTotals.expense)}
+                {/* AI Insights Card */}
+                {isAiAuthorized && (
+                  <div className="bg-indigo-600 rounded-[2.5rem] p-7 text-white shadow-xl relative overflow-hidden group">
+                    <div className="absolute -right-8 -bottom-8 w-24 h-24 bg-white/10 rounded-full blur-2xl group-hover:scale-150 transition-transform"></div>
+                    <div className="flex items-center space-x-2 mb-3">
+                        <Sparkles size={16} className="text-indigo-200" />
+                        <h3 className="text-[11px] font-black uppercase tracking-widest">PLATINUM INSIGHTS</h3>
+                    </div>
+                    <p className={`text-[13px] leading-relaxed font-medium ${loadingInsights ? 'opacity-50 animate-pulse' : 'opacity-100'}`}>"{insights}"</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Tab: Journal */}
+            {activeTab === 'journal' && (
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+                <div className="flex flex-col space-y-4">
+                  <h3 className="text-2xl font-black tracking-tight px-1">Ledger Journal</h3>
+                  <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
+                    {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
+                      <button key={p} onClick={() => setJournalPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${journalPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  {journalTransactions.length === 0 ? (
+                    <div className="text-center py-24 text-slate-400 space-y-4">
+                      <CalendarDays className="mx-auto opacity-10" size={80} />
+                      <p className="text-xs font-black uppercase tracking-widest">No transaction logs</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {journalTransactions.map((t, idx) => {
+                        const showDateHeader = idx === 0 || t.date !== journalTransactions[idx - 1].date;
+                        const cat = (t.type === 'income' ? incomeCategories : expenseCategories).find(c => c.name === t.category);
+                        return (
+                          <div key={t.id} className="space-y-2">
+                            {showDateHeader && (
+                              <div className="flex items-center space-x-2 mt-6 first:mt-0 px-2">
+                                <p className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-[0.2em]">
+                                  {new Date(t.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                                </p>
+                                <div className="h-[1px] flex-1 bg-slate-100 dark:bg-slate-800"></div>
+                              </div>
+                            )}
+                            <div onClick={() => handleEditClick(t)} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] flex items-center justify-between premium-shadow border border-slate-50 dark:border-slate-800 active:scale-95 transition-transform cursor-pointer">
+                              <div className="flex items-center space-x-4">
+                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-xl ${t.type === 'income' ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
+                                  {cat?.icon || '📦'}
+                                </div>
+                                <div>
+                                  <p className="font-bold text-sm">{t.category}</p>
+                                  <div className="flex items-center text-[10px] text-slate-400 font-bold space-x-2">
+                                    <span className="flex items-center"><Clock size={10} className="mr-1" /> {new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                    <span className="italic truncate max-w-[120px]">{t.note || 'No description'}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <p className={`font-black text-md ${t.type === 'income' ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                {t.type === 'income' ? '+' : '-'}{formatPrice(t.amount)}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Tab: Stats */}
+            {activeTab === 'stats' && (
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+                <div className="flex flex-col space-y-4">
+                  <h3 className="text-2xl font-black tracking-tight px-1 text-center">Inflow vs Outflow</h3>
+                  <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
+                    {(['day', 'week', 'month', 'year'] as TimePeriod[]).map(p => (
+                      <button key={p} onClick={() => setStatsPeriod(p)} className={`flex-1 py-2.5 text-[10px] font-black uppercase rounded-xl transition-all ${statsPeriod === p ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-slate-400'}`}>{p}</button>
+                    ))}
+                  </div>
+                  <p className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                      Showing Stats for {statsPeriod === 'day' ? 'Selected Day' : statsPeriod === 'week' ? 'Selected Week' : statsPeriod === 'month' ? MONTHS[currentDate.getMonth()] : currentDate.getFullYear()}
                   </p>
                 </div>
-                <div className={`px-4 py-2 rounded-2xl font-black text-[10px] uppercase tracking-widest ${statsTabTotals.income >= statsTabTotals.expense ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
-                  {statsTabTotals.income >= statsTabTotals.expense ? 'SURPLUS' : 'DEFICIT'}
+                
+                {/* Stats Cards */}
+                <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-emerald-50 dark:bg-emerald-950/20 p-5 rounded-[2rem] border border-emerald-100 dark:border-emerald-900/50">
+                        <div className="flex items-center space-x-2 mb-2 text-emerald-600">
+                            <TrendingUp size={16} />
+                            <span className="text-[9px] font-black uppercase tracking-widest">Income</span>
+                        </div>
+                        <p className="text-xl font-black text-emerald-700 dark:text-emerald-400">{formatPrice(statsTabTotals.income)}</p>
+                    </div>
+                    <div className="bg-rose-50 dark:bg-rose-950/20 p-5 rounded-[2rem] border border-rose-100 dark:border-rose-900/50">
+                        <div className="flex items-center space-x-2 mb-2 text-rose-600">
+                            <TrendingDown size={16} />
+                            <span className="text-[9px] font-black uppercase tracking-widest">Expense</span>
+                        </div>
+                        <p className="text-xl font-black text-rose-700 dark:text-rose-400">{formatPrice(statsTabTotals.expense)}</p>
+                    </div>
+                </div>
+
+                {/* Net Savings Card */}
+                <div className="bg-white dark:bg-slate-900 p-7 rounded-[2.5rem] premium-shadow border border-slate-50 dark:border-slate-800 flex items-center justify-between">
+                    <div>
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Net Savings</p>
+                      <p className={`text-3xl font-black ${statsTabTotals.income >= statsTabTotals.expense ? 'text-slate-800 dark:text-white' : 'text-rose-500'}`}>
+                          {formatPrice(statsTabTotals.income - statsTabTotals.expense)}
+                      </p>
+                    </div>
+                    <div className={`px-4 py-2 rounded-2xl font-black text-[10px] uppercase tracking-widest ${statsTabTotals.income >= statsTabTotals.expense ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
+                      {statsTabTotals.income >= statsTabTotals.expense ? 'SURPLUS' : 'DEFICIT'}
+                    </div>
+                </div>
+
+                {/* New Bar Chart for Trends */}
+                <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
+                   <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Trend Analysis</h4>
+                   <PremiumBarChart transactions={statsTransactions} period={statsPeriod} currencySymbol={currency.symbol} />
+                </div>
+
+                <div className="space-y-6">
+                  <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
+                    <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Expenses</h4>
+                    <PremiumChart transactions={statsTransactions} type="expense" currencySymbol={currency.symbol} />
+                  </div>
+                  <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
+                    <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Inflow</h4>
+                    <PremiumChart transactions={statsTransactions} type="income" currencySymbol={currency.symbol} />
+                  </div>
                 </div>
               </div>
+            )}
 
-            <div className="space-y-6">
-              <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
-                <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Expenses</h4>
-                <PremiumChart transactions={statsTransactions} type="expense" currencySymbol={currency.symbol} />
-              </div>
-              <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
-                <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Inflow</h4>
-                <PremiumChart transactions={statsTransactions} type="income" currencySymbol={currency.symbol} />
-              </div>
-            </div>
-           </div>
-        )}
+            {/* Tab: Limits */}
+            {activeTab === 'limits' && (
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+                  <div className="flex flex-col space-y-4">
+                    <h3 className="text-2xl font-black tracking-tight px-1 text-center">Budget Limits</h3>
+                    <p className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                        Manage your spending caps
+                    </p>
+                  </div>
 
-        {/* Tab: Limits */}
-        {activeTab === 'limits' && (
-           <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
-               <div className="flex flex-col space-y-4">
-                 <h3 className="text-2xl font-black tracking-tight px-1 text-center">Budget Limits</h3>
-                 <p className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                    Manage your spending caps
-                 </p>
-               </div>
+                    <div className="grid grid-cols-1 gap-4">
+                      {expenseCategories.map(cat => {
+                        const { limit, spent } = getBudgetProgress(cat.name);
+                        const percent = limit > 0 ? Math.min((spent / limit) * 100, 100) : 0;
+                        const isEditing = editingBudgetCategory === cat.name;
 
-                <div className="grid grid-cols-1 gap-4">
-                   {expenseCategories.map(cat => {
-                     const { limit, spent } = getBudgetProgress(cat.name);
-                     const percent = limit > 0 ? Math.min((spent / limit) * 100, 100) : 0;
-                     const isEditing = editingBudgetCategory === cat.name;
+                        return (
+                          <div key={cat.id} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] shadow-sm border border-slate-100 dark:border-slate-800 relative overflow-hidden">
+                              <div 
+                                className="absolute bottom-0 left-0 h-1 bg-indigo-600 transition-all duration-1000" 
+                                style={{ width: `${percent}%`, backgroundColor: percent >= 100 ? '#f43f5e' : '#4f46e5' }}
+                              ></div>
 
-                     return (
-                       <div key={cat.id} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] shadow-sm border border-slate-100 dark:border-slate-800 relative overflow-hidden">
-                          <div 
-                            className="absolute bottom-0 left-0 h-1 bg-indigo-600 transition-all duration-1000" 
-                            style={{ width: `${percent}%`, backgroundColor: percent >= 100 ? '#f43f5e' : '#4f46e5' }}
-                          ></div>
-
-                          <div className="flex justify-between items-start mb-4">
-                            <div className="flex items-center space-x-3">
-                              <div className="text-3xl bg-slate-50 dark:bg-slate-800 w-12 h-12 flex items-center justify-center rounded-2xl">{cat.icon}</div>
-                              <div>
-                                <h3 className="font-bold text-sm">{cat.name}</h3>
-                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
-                                  {limit > 0 ? `${Math.round(percent)}% Used` : 'No Limit Set'}
-                                </p>
+                              <div className="flex justify-between items-start mb-4">
+                                <div className="flex items-center space-x-3">
+                                  <div className="text-3xl bg-slate-50 dark:bg-slate-800 w-12 h-12 flex items-center justify-center rounded-2xl">{cat.icon}</div>
+                                  <div>
+                                    <h3 className="font-bold text-sm">{cat.name}</h3>
+                                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
+                                      {limit > 0 ? `${Math.round(percent)}% Used` : 'No Limit Set'}
+                                    </p>
+                                  </div>
+                                </div>
+                                <button 
+                                  onClick={() => {
+                                    if (isEditing) handleSaveBudget();
+                                    else {
+                                      setEditingBudgetCategory(cat.name);
+                                      setEditingBudgetLimit(limit.toString());
+                                    }
+                                  }}
+                                  className={`p-2 rounded-xl transition-all ${isEditing ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-400'}`}
+                                >
+                                  {isEditing ? <CheckCircle2 size={18} /> : <Edit3 size={18} />}
+                                </button>
                               </div>
-                            </div>
-                            <button 
-                              onClick={() => {
-                                if (isEditing) handleSaveBudget();
-                                else {
-                                  setEditingBudgetCategory(cat.name);
-                                  setEditingBudgetLimit(limit.toString());
-                                }
-                              }}
-                              className={`p-2 rounded-xl transition-all ${isEditing ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-400'}`}
-                            >
-                              {isEditing ? <CheckCircle2 size={18} /> : <Edit3 size={18} />}
-                            </button>
+
+                              {isEditing ? (
+                                <div className="animate-in fade-in slide-in-from-top-2">
+                                  <div className="relative">
+                                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">{currency.symbol}</span>
+                                      <input 
+                                        type="number" 
+                                        autoFocus
+                                        value={editingBudgetLimit}
+                                        onChange={(e) => setEditingBudgetLimit(e.target.value)}
+                                        placeholder="Set limit"
+                                        className="w-full bg-slate-50 dark:bg-slate-800 pl-10 pr-4 py-3 rounded-xl font-black text-lg"
+                                      />
+                                  </div>
+                                  <p className="text-[9px] text-slate-400 mt-2 ml-2">Set to 0 to remove limit.</p>
+                                </div>
+                              ) : (
+                                <div className="flex justify-between items-end">
+                                  <div>
+                                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Spent</p>
+                                    <p className="text-lg font-black">{formatPrice(spent)}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cap</p>
+                                    <p className={`text-lg font-black ${limit > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-300'}`}>
+                                      {limit > 0 ? formatPrice(limit) : '∞'}
+                                    </p>
+                                  </div>
+                                </div>
+                              )}
                           </div>
+                        );
+                      })}
+                    </div>
+              </div>
+            )}
+          </main>
 
-                          {isEditing ? (
-                            <div className="animate-in fade-in slide-in-from-top-2">
-                               <div className="relative">
-                                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">{currency.symbol}</span>
-                                  <input 
-                                    type="number" 
-                                    autoFocus
-                                    value={editingBudgetLimit}
-                                    onChange={(e) => setEditingBudgetLimit(e.target.value)}
-                                    placeholder="Set limit"
-                                    className="w-full bg-slate-50 dark:bg-slate-800 pl-10 pr-4 py-3 rounded-xl font-black text-lg"
-                                  />
-                               </div>
-                               <p className="text-[9px] text-slate-400 mt-2 ml-2">Set to 0 to remove limit.</p>
-                            </div>
-                          ) : (
-                            <div className="flex justify-between items-end">
-                              <div>
-                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Spent</p>
-                                <p className="text-lg font-black">{formatPrice(spent)}</p>
-                              </div>
-                              <div className="text-right">
-                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cap</p>
-                                <p className={`text-lg font-black ${limit > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-300'}`}>
-                                  {limit > 0 ? formatPrice(limit) : '∞'}
-                                </p>
-                              </div>
-                            </div>
-                          )}
-                       </div>
-                     );
-                   })}
-                </div>
-           </div>
-        )}
-      </main>
+          {/* Floating Action Button */}
+          <div className="fixed bottom-24 left-0 right-0 flex justify-center z-30 pointer-events-none">
+            <button onClick={() => { resetForm(); setShowAddModal(true); }} className="pointer-events-auto bg-slate-900 dark:bg-indigo-600 text-white w-16 h-16 rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all border-4 border-slate-50 dark:border-slate-950">
+              <Plus size={32} />
+            </button>
+          </div>
 
-      {/* Floating Action Button */}
-      <div className="fixed bottom-24 left-0 right-0 flex justify-center z-30 pointer-events-none">
-        <button onClick={() => { resetForm(); setShowAddModal(true); }} className="pointer-events-auto bg-slate-900 dark:bg-indigo-600 text-white w-16 h-16 rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all border-4 border-slate-50 dark:border-slate-950">
-          <Plus size={32} />
-        </button>
-      </div>
-
-      {/* Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 glass dark:bg-slate-900/90 border-t border-slate-200 dark:border-slate-800 z-40 px-6 py-4">
-        <div className="max-w-lg mx-auto flex justify-between items-center">
-          <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'home' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
-            <LayoutDashboard size={22} strokeWidth={activeTab === 'home' ? 2.5 : 2} />
-            <span className="text-[10px] font-black uppercase tracking-widest">Dash</span>
-          </button>
-          <button onClick={() => setActiveTab('journal')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'journal' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
-            <CalendarDays size={22} strokeWidth={activeTab === 'journal' ? 2.5 : 2} />
-            <span className="text-[10px] font-black uppercase tracking-widest">Logs</span>
-          </button>
-          <div className="w-16 h-10"></div>
-          <button onClick={() => setActiveTab('stats')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'stats' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
-            <PieIcon size={22} strokeWidth={activeTab === 'stats' ? 2.5 : 2} />
-            <span className="text-[10px] font-black uppercase tracking-widest">Stats</span>
-          </button>
-          <button onClick={() => setActiveTab('limits')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'limits' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
-            <TrendingUp size={22} strokeWidth={activeTab === 'limits' ? 2.5 : 2} />
-            <span className="text-[10px] font-black uppercase tracking-widest">Limits</span>
-          </button>
-        </div>
-      </nav>
+          {/* Navigation */}
+          <nav className="fixed bottom-0 left-0 right-0 glass dark:bg-slate-900/90 border-t border-slate-200 dark:border-slate-800 z-40 px-6 py-4">
+            <div className="max-w-lg mx-auto flex justify-between items-center">
+              <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'home' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
+                <LayoutDashboard size={22} strokeWidth={activeTab === 'home' ? 2.5 : 2} />
+                <span className="text-[10px] font-black uppercase tracking-widest">Dash</span>
+              </button>
+              <button onClick={() => setActiveTab('journal')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'journal' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
+                <CalendarDays size={22} strokeWidth={activeTab === 'journal' ? 2.5 : 2} />
+                <span className="text-[10px] font-black uppercase tracking-widest">Logs</span>
+              </button>
+              <div className="w-16 h-10"></div>
+              <button onClick={() => setActiveTab('stats')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'stats' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
+                <PieIcon size={22} strokeWidth={activeTab === 'stats' ? 2.5 : 2} />
+                <span className="text-[10px] font-black uppercase tracking-widest">Stats</span>
+              </button>
+              <button onClick={() => setActiveTab('limits')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'limits' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
+                <TrendingUp size={22} strokeWidth={activeTab === 'limits' ? 2.5 : 2} />
+                <span className="text-[10px] font-black uppercase tracking-widest">Limits</span>
+              </button>
+            </div>
+          </nav>
+        </>
+      )}
 
       {/* Settings Panel */}
       {showSettings && (
@@ -1160,14 +1206,13 @@ const App: React.FC = () => {
                 <h2 className="text-3xl font-black tracking-tighter">Settings</h2>
                 <button onClick={() => setShowSettings(false)} className="p-3 bg-slate-100 dark:bg-slate-900 rounded-full transition-transform active:scale-90"><X size={24}/></button>
               </div>
-
+              
                {/* ACCOUNT & FIREBASE AUTH */}
                <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-indigo-500 mb-2">
                    <UserIcon size={16} />
                    <h3 className="text-[10px] font-black uppercase tracking-widest">Luxe Account</h3>
                  </div>
-                 
                  <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
                    {firebaseUser ? (
                      <div className="space-y-4">
@@ -1199,7 +1244,7 @@ const App: React.FC = () => {
                  </div>
                </section>
 
-               {/* User Info (Moved Up) */}
+               {/* User Info */}
                <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-slate-400 mb-2">
                    <UserIcon size={16} />
@@ -1218,15 +1263,13 @@ const App: React.FC = () => {
                  </div>
                </section>
 
-               {/* Intelligence Section (API Key) */}
+               {/* Intelligence Section */}
                <section className="space-y-4">
                  <div className="flex items-center space-x-2 text-indigo-500 mb-2">
                    <Sparkles size={16} />
                    <h3 className="text-[10px] font-black uppercase tracking-widest">AI Connection</h3>
                  </div>
-                 
                  <div className="bg-[#0f172a] rounded-[2rem] p-6 text-white relative overflow-hidden shadow-xl border border-slate-800">
-                     {/* Status Indicator */}
                      <div className="flex items-center gap-4 mb-6">
                         <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border-2 ${settings.apiKey ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30'}`}>
                            {settings.apiKey ? <CheckCircle2 size={24} /> : <AlertCircle size={24} />}
@@ -1236,8 +1279,6 @@ const App: React.FC = () => {
                            <p className="text-[11px] text-slate-400 font-medium">{settings.apiKey ? 'Gemini is active' : 'Connect API Key below'}</p>
                         </div>
                      </div>
-                     
-                     {/* Input Field */}
                      <div className="relative group">
                         <Key className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" size={18} />
                         <input 
@@ -1248,8 +1289,6 @@ const App: React.FC = () => {
                           className="w-full bg-[#1e293b] border border-slate-700 rounded-full pl-12 pr-6 py-4 text-sm font-bold focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all placeholder:text-slate-600 shadow-inner"
                         />
                      </div>
-                     
-                     {/* Link */}
                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 mt-4 ml-2 text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition-colors uppercase tracking-wide">
                         <span>Get a free key at Google AI Studio</span>
                         <ExternalLink size={10} />
@@ -1264,37 +1303,20 @@ const App: React.FC = () => {
                    <h3 className="text-[10px] font-black uppercase tracking-widest">Data & Migration</h3>
                  </div>
                  <div className="grid grid-cols-2 gap-3">
-                    <button 
-                      onClick={handleExportData}
-                      className="bg-white dark:bg-slate-900 p-4 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center space-y-2 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all"
-                    >
+                    <button onClick={handleExportData} className="bg-white dark:bg-slate-900 p-4 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center space-y-2 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all">
                       <Download size={24} className="text-indigo-600" />
                       <span className="text-[10px] font-black uppercase tracking-widest">Export CSV</span>
                     </button>
-                    
-                    <button 
-                      onClick={handleDownloadTemplate}
-                      className="bg-white dark:bg-slate-900 p-4 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center space-y-2 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all"
-                    >
+                    <button onClick={handleDownloadTemplate} className="bg-white dark:bg-slate-900 p-4 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center space-y-2 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all">
                       <FileSpreadsheet size={24} className="text-emerald-500" />
                       <span className="text-[10px] font-black uppercase tracking-widest">Get Template</span>
                     </button>
                  </div>
-
                  <div className="bg-white dark:bg-slate-900 p-6 rounded-[2.5rem] shadow-sm border border-slate-100 dark:border-slate-800">
                    <div className="text-center space-y-3">
                      <p className="text-xs font-bold text-slate-500">Restore from CSV</p>
-                     <input 
-                       type="file" 
-                       accept=".csv"
-                       ref={fileInputRef}
-                       onChange={handleFileUpload}
-                       className="hidden"
-                     />
-                     <button 
-                        onClick={() => fileInputRef.current?.click()}
-                        className="w-full bg-slate-900 dark:bg-indigo-600 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center space-x-2 active:scale-95 transition-all"
-                     >
+                     <input type="file" accept=".csv" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+                     <button onClick={() => fileInputRef.current?.click()} className="w-full bg-slate-900 dark:bg-indigo-600 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center space-x-2 active:scale-95 transition-all">
                        <Upload size={16} />
                        <span>Upload & Restore</span>
                      </button>
@@ -1334,21 +1356,15 @@ const App: React.FC = () => {
                  </div>
               </section>
 
-              {/* LOGIN / LOGOUT BUTTON (BOTTOM OF SETTINGS) */}
+              {/* LOGOUT */}
               <div className="pt-4">
                 {firebaseUser ? (
-                  <button 
-                    onClick={handleSignOut}
-                    className="w-full bg-rose-500 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2"
-                  >
+                  <button onClick={handleSignOut} className="w-full bg-rose-500 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2">
                     <LogOut size={20} />
                     <span className="uppercase tracking-widest">Log Out</span>
                   </button>
                 ) : (
-                  <button 
-                    onClick={() => { setShowAuthModal(true); setAuthMode('signin'); setAuthError(''); setVerificationRequired(false); }}
-                    className="w-full bg-indigo-600 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2"
-                  >
+                  <button onClick={() => { setShowAuthModal(true); setAuthMode('signin'); setAuthError(''); setVerificationRequired(false); }} className="w-full bg-indigo-600 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2">
                     <LogIn size={20} />
                     <span className="uppercase tracking-widest">Log In / Sign Up</span>
                   </button>
@@ -1363,108 +1379,30 @@ const App: React.FC = () => {
       {showAuthModal && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
            <div className="bg-white dark:bg-slate-950 w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl relative border border-white/20">
-               <button 
-                 onClick={() => {
-                   if (!verificationRequired) setShowAuthModal(false);
-                 }} 
-                 className={`absolute top-6 right-6 p-2 rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${verificationRequired ? 'hidden' : ''}`}
-               >
-                 <X size={24} />
-               </button>
-
+               <button onClick={() => { if (!verificationRequired) setShowAuthModal(false); }} className={`absolute top-6 right-6 p-2 rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${verificationRequired ? 'hidden' : ''}`}><X size={24} /></button>
+               
                {verificationRequired ? (
                  <div className="text-center space-y-6 py-6">
-                    <div className="w-20 h-20 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4 animate-bounce">
-                      <Mail size={32} />
-                    </div>
+                    <div className="w-20 h-20 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4 animate-bounce"><Mail size={32} /></div>
                     <h3 className="text-2xl font-black tracking-tight">Verify Your Email</h3>
-                    <p className="text-sm text-slate-500 font-medium leading-relaxed">
-                      We have sent a verification email to <br/>
-                      <span className="font-bold text-slate-800 dark:text-white">{verificationEmail}</span>
-                    </p>
-                    <p className="text-xs text-slate-400">Please verify it and log in again to secure your account.</p>
-                    <button 
-                      onClick={() => { setVerificationRequired(false); setAuthMode('signin'); }}
-                      className="w-full bg-slate-900 dark:bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest"
-                    >
-                      Back to Login
-                    </button>
+                    <p className="text-sm text-slate-500 font-medium leading-relaxed">We have sent a verification email to <br/><span className="font-bold text-slate-800 dark:text-white">{verificationEmail}</span></p>
+                    <button onClick={() => { setVerificationRequired(false); setAuthMode('signin'); }} className="w-full bg-slate-900 dark:bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest">Back to Login</button>
                  </div>
                ) : (
                  <div className="space-y-6">
-                    <div className="text-center mb-8">
-                       <h3 className="text-2xl font-black tracking-tight">{authMode === 'signin' ? 'Welcome Back' : 'Join Luxe Ledger'}</h3>
-                       <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-2">Secure Cloud Sync</p>
-                    </div>
-
+                    <div className="text-center mb-8"><h3 className="text-2xl font-black tracking-tight">{authMode === 'signin' ? 'Welcome Back' : 'Join Luxe Ledger'}</h3><p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-2">Secure Cloud Sync</p></div>
                     <div className="flex gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl">
-                        <button 
-                          onClick={() => { setAuthMode('signin'); setAuthError(''); }}
-                          className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signin' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}
-                        >
-                          Sign In
-                        </button>
-                        <button 
-                          onClick={() => { setAuthMode('signup'); setAuthError(''); }}
-                          className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signup' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}
-                        >
-                          Sign Up
-                        </button>
+                        <button onClick={() => { setAuthMode('signin'); setAuthError(''); }} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signin' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}>Sign In</button>
+                        <button onClick={() => { setAuthMode('signup'); setAuthError(''); }} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signup' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}>Sign Up</button>
                     </div>
-
-                    {authError && (
-                      <div className="p-4 bg-rose-50 dark:bg-rose-950/30 border border-rose-100 dark:border-rose-900/50 text-rose-600 dark:text-rose-400 rounded-2xl flex items-center gap-3 text-xs font-bold animate-in slide-in-from-top-2">
-                        <AlertCircle size={16} />
-                        <span>{authError}</span>
-                      </div>
-                    )}
-
+                    {authError && <div className="p-4 bg-rose-50 dark:bg-rose-950/30 border border-rose-100 dark:border-rose-900/50 text-rose-600 dark:text-rose-400 rounded-2xl flex items-center gap-3 text-xs font-bold animate-in slide-in-from-top-2"><AlertCircle size={16} /><span>{authError}</span></div>}
                     <form onSubmit={handleEmailAuth} className="space-y-4">
-                        <div className="relative group">
-                          <Mail className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} />
-                          <input 
-                            type="email" 
-                            value={authEmail}
-                            onChange={(e) => setAuthEmail(e.target.value)}
-                            placeholder="Email Address"
-                            className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all"
-                            required
-                          />
-                        </div>
-                        <div className="relative group">
-                          <Lock className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} />
-                          <input 
-                            type="password" 
-                            value={authPassword}
-                            onChange={(e) => setAuthPassword(e.target.value)}
-                            placeholder="Password"
-                            className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all"
-                            required
-                          />
-                        </div>
-                        <button 
-                          type="submit" 
-                          disabled={authLoading}
-                          className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {authLoading ? <Loader2 size={18} className="animate-spin mx-auto" /> : (authMode === 'signin' ? 'Log In' : 'Create Account')}
-                        </button>
+                        <div className="relative group"><Mail className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} /><input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="Email Address" className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all" required /></div>
+                        <div className="relative group"><Lock className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} /><input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Password" className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all" required /></div>
+                        <button type="submit" disabled={authLoading} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">{authLoading ? <Loader2 size={18} className="animate-spin mx-auto" /> : (authMode === 'signin' ? 'Log In' : 'Create Account')}</button>
                     </form>
-
-                    <div className="flex items-center gap-4">
-                      <div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div>
-                      <span className="text-[9px] text-slate-300 font-black uppercase">OR</span>
-                      <div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div>
-                    </div>
-
-                    <button 
-                      onClick={handleGoogleAuth}
-                      disabled={authLoading}
-                      className="w-full bg-white dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-800 py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all active:scale-95"
-                    >
-                      <Chrome size={18} className="text-indigo-600" />
-                      <span>Continue with Google</span>
-                    </button>
+                    <div className="flex items-center gap-4"><div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div><span className="text-[9px] text-slate-300 font-black uppercase">OR</span><div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div></div>
+                    <button onClick={handleGoogleAuth} disabled={authLoading} className="w-full bg-white dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-800 py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all active:scale-95"><Chrome size={18} className="text-indigo-600" /><span>Continue with Google</span></button>
                  </div>
                )}
            </div>
@@ -1521,7 +1459,34 @@ const App: React.FC = () => {
                 <div className="flex justify-between items-center">
                   <h2 className="text-xl font-black tracking-tight">{editingTransactionId ? 'Modify Record' : 'New Entry'}</h2>
                   <div className="flex items-center space-x-2">
-                    <button onClick={() => { setShowAddModal(false); resetForm(); }} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400"><X size={20}/></button>
+                    {editingTransactionId && (
+                      showDeleteConfirm ? (
+                         <div className="flex items-center space-x-2 mr-2 animate-in slide-in-from-right-4 fade-in">
+                            <span className="text-[10px] text-rose-500 font-bold uppercase">Sure?</span>
+                            <button 
+                              onClick={handleDeleteTransaction} 
+                              className="p-2 bg-rose-500 rounded-full text-white hover:bg-rose-600 transition-colors shadow-lg"
+                            >
+                              <CheckCircle2 size={16} />
+                            </button>
+                            <button 
+                              onClick={() => setShowDeleteConfirm(false)} 
+                              className="p-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-400"
+                            >
+                               <X size={16} />
+                            </button>
+                         </div>
+                      ) : (
+                        <button onClick={() => setShowDeleteConfirm(true)} className="p-2 bg-rose-50 dark:bg-rose-900/30 rounded-full text-rose-500 hover:bg-rose-100 transition-colors">
+                          <Trash2 size={20} />
+                        </button>
+                      )
+                    )}
+                    {!showDeleteConfirm && (
+                      <button onClick={() => { setShowAddModal(false); resetForm(); }} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400">
+                        <X size={20}/>
+                      </button>
+                    )}
                   </div>
                 </div>
                 
