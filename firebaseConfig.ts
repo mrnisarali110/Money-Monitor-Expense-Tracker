@@ -1,3 +1,4 @@
+
 import firebase from "firebase/compat/app";
 import "firebase/compat/auth";
 import "firebase/compat/firestore";
@@ -16,4 +17,15 @@ const firebaseConfig = {
 const app = firebase.initializeApp(firebaseConfig);
 export const auth = app.auth();
 export const db = app.firestore();
+
+// Enable offline persistence
+db.enablePersistence()
+  .catch((err) => {
+    if (err.code == 'failed-precondition') {
+      console.warn('Persistence failed: Multiple tabs open');
+    } else if (err.code == 'unimplemented') {
+      console.warn('Persistence failed: Browser not supported');
+    }
+  });
+
 export default app;

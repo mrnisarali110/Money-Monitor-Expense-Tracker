@@ -54,7 +54,8 @@ import {
   INITIAL_EXPENSE_CATEGORIES, 
   MONTHS, 
   CURRENCIES,
-  COMMON_EMOJIS
+  COMMON_EMOJIS,
+  DAYS_SHORT
 } from './constants';
 import { PremiumChart } from './components/PremiumChart';
 import { PremiumBarChart } from './components/PremiumBarChart';
@@ -75,6 +76,9 @@ declare global {
   }
 }
 
+// Consistent Icon URL (Dark Dollar Icon)
+const APP_ICON_URL = "https://cdn-icons-png.flaticon.com/512/2474/2474450.png";
+
 // --- CONFIGURATION ---
 type TabType = 'home' | 'journal' | 'stats' | 'limits';
 type TimePeriod = 'day' | 'week' | 'month' | 'year';
@@ -85,6 +89,143 @@ interface Notification {
   message: string;
   type: 'success' | 'error' | 'info';
 }
+
+// --- HELPER COMPONENT: Swipeable Transaction Item ---
+interface SwipeableItemProps {
+  t: Transaction;
+  category: Category | undefined;
+  currencySymbol: string;
+  hideBalances: boolean;
+  onEdit: (t: Transaction) => void;
+  onDelete: (t: Transaction) => void;
+}
+
+const SwipeableTransactionItem: React.FC<SwipeableItemProps> = ({ 
+  t, category, currencySymbol, hideBalances, onEdit, onDelete 
+}) => {
+  const [offsetX, setOffsetX] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const startX = useRef<number | null>(null);
+  const longPressTimer = useRef<NodeJS.Timeout | null>(null);
+  const isLongPress = useRef(false);
+
+  const formatPrice = (val: number) => {
+    if (hideBalances) return '••••••';
+    return `${currencySymbol} ${val.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  };
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    startX.current = e.touches[0].clientX;
+    isLongPress.current = false;
+    
+    // Start Long Press Timer (1.25s)
+    longPressTimer.current = setTimeout(() => {
+      isLongPress.current = true;
+      // Trigger Haptic Feedback if available
+      if (navigator.vibrate) navigator.vibrate(50);
+      onEdit(t);
+    }, 1250);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (startX.current === null) return;
+    const currentX = e.touches[0].clientX;
+    const diff = currentX - startX.current;
+
+    // If moving, cancel long press
+    if (Math.abs(diff) > 10 && longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+
+    setOffsetX(diff);
+    if (Math.abs(diff) > 10) setIsSwiping(true);
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+    }
+    startX.current = null;
+
+    if (offsetX > 100) {
+      // Swipe Right -> Delete
+      onDelete(t);
+      setOffsetX(0); 
+    } else if (offsetX < -100) {
+      // Swipe Left -> Edit
+      onEdit(t);
+      setOffsetX(0);
+    } else {
+      // Reset
+      setOffsetX(0);
+    }
+    
+    setTimeout(() => setIsSwiping(false), 300);
+  };
+
+  // Mouse handlers for desktop testing of Long Press
+  const handleMouseDown = () => {
+    isLongPress.current = false;
+    longPressTimer.current = setTimeout(() => {
+      isLongPress.current = true;
+      onEdit(t);
+    }, 1250);
+  };
+
+  const handleMouseUp = () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+  };
+
+  return (
+    <div className="relative overflow-hidden rounded-[2rem]">
+      {/* Background Actions */}
+      <div className={`absolute inset-0 flex items-center justify-between px-6 transition-colors duration-300 ${offsetX > 0 ? 'bg-rose-500' : offsetX < 0 ? 'bg-indigo-500' : 'bg-transparent'}`}>
+         {/* Left Side (Delete) */}
+         <div className={`flex items-center text-white font-bold transition-opacity ${offsetX > 50 ? 'opacity-100' : 'opacity-0'}`}>
+           <Trash2 size={24} className="mr-2" />
+           <span className="text-xs uppercase tracking-widest">Delete</span>
+         </div>
+         {/* Right Side (Edit) */}
+         <div className={`flex items-center text-white font-bold transition-opacity ${offsetX < -50 ? 'opacity-100' : 'opacity-0'}`}>
+           <span className="text-xs uppercase tracking-widest mr-2">Edit</span>
+           <Edit3 size={24} />
+         </div>
+      </div>
+
+      {/* Foreground Content */}
+      <div 
+        className="bg-white dark:bg-slate-900 p-5 relative premium-shadow border border-slate-50 dark:border-slate-800 transition-transform duration-200 ease-out"
+        style={{ transform: `translateX(${offsetX}px)` }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
+        <div className="flex items-center justify-between select-none">
+          <div className="flex items-center space-x-4">
+            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-xl ${t.type === 'income' ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
+              {category?.icon || '📦'}
+            </div>
+            <div>
+              <p className="font-bold text-sm">{t.category}</p>
+              <div className="flex items-center text-[10px] text-slate-400 font-bold space-x-2">
+                <span className="flex items-center"><Clock size={10} className="mr-1" /> {new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span className="italic truncate max-w-[120px]">{t.note || 'No description'}</span>
+              </div>
+            </div>
+          </div>
+          <p className={`font-black text-md ${t.type === 'income' ? 'text-emerald-500' : 'text-rose-500'}`}>
+            {t.type === 'income' ? '+' : '-'}{formatPrice(t.amount)}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
 const App: React.FC = () => {
   // --- Persistent State ---
@@ -233,8 +374,8 @@ const App: React.FC = () => {
         if (Notification.permission === 'granted') {
           new Notification("Luxe Ledger", {
             body: "Have you entered today's expenses?",
-            icon: "/manifest-icon-192.maskable.png", // Assuming path
-            badge: "/manifest-icon-192.maskable.png"
+            icon: APP_ICON_URL,
+            badge: APP_ICON_URL
           });
         }
       }
@@ -268,7 +409,7 @@ const App: React.FC = () => {
       if (permission === 'granted') {
         setSettings(prev => ({...prev, dailyReminders: true}));
         addNotification("Daily reminders enabled", "success");
-        new Notification("Luxe Ledger", { body: "You're all set! We'll remind you to track expenses." });
+        new Notification("Luxe Ledger", { body: "You're all set! We'll remind you to track expenses.", icon: APP_ICON_URL });
       } else {
         setSettings(prev => ({...prev, dailyReminders: false}));
         addNotification("Permission denied", "error");
@@ -366,8 +507,18 @@ const App: React.FC = () => {
       }
     };
 
+    // Save immediately if coming online, otherwise debounce
+    const handleOnline = () => {
+        addNotification("Back Online - Syncing...", "success");
+        saveToFirestore();
+    };
+    window.addEventListener('online', handleOnline);
+
     const timer = setTimeout(saveToFirestore, 2000); // 2s debounce
-    return () => clearTimeout(timer);
+    return () => {
+        clearTimeout(timer);
+        window.removeEventListener('online', handleOnline);
+    };
   }, [transactions, budgets, settings, currency, incomeCategories, expenseCategories, firebaseUser]);
 
   // Local Persistence
@@ -544,17 +695,18 @@ const App: React.FC = () => {
   const statsTransactions = useMemo(() => getFilteredTransactions(statsPeriod), [transactions, statsPeriod, currentPeriod, currentDate]);
   
   const dailyActivity = useMemo(() => {
+    // Return last 7 days including today
     const last7Days = Array.from({length: 7}, (_, i) => {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      return d.toDateString();
+      return { date: d.toDateString(), dayName: DAYS_SHORT[d.getDay()] };
     }).reverse();
 
-    const stats = last7Days.map(dayStr => {
+    const stats = last7Days.map(({ date, dayName }) => {
       const dayTotal = transactions
-        .filter(t => new Date(t.date).toDateString() === dayStr && t.type === 'expense')
+        .filter(t => new Date(t.date).toDateString() === date && t.type === 'expense')
         .reduce((sum, t) => sum + t.amount, 0);
-      return dayTotal;
+      return { dayName, amount: dayTotal };
     });
 
     return stats;
@@ -787,7 +939,7 @@ const App: React.FC = () => {
       if (settings.dailyReminders && Notification.permission === 'granted') {
           new Notification("Luxe Ledger Alert", {
               body: `You've exceeded your budget for ${categoryName}!`,
-              icon: "/manifest-icon-192.maskable.png"
+              icon: APP_ICON_URL
           });
       }
     }
@@ -844,6 +996,12 @@ const App: React.FC = () => {
     setNewCategory(t.category);
     setNewNote(t.note || '');
     setShowAddModal(true);
+  };
+
+  const handleDeleteRequest = (t: Transaction) => {
+    setEditingTransactionId(t.id);
+    setShowDeleteConfirm(true);
+    setShowAddModal(true); // Re-use the modal logic but in delete state
   };
 
   const handleSaveBudget = () => {
@@ -948,7 +1106,9 @@ const App: React.FC = () => {
           {/* Header - Static Block */}
           <header className="flex-none z-20 glass dark:bg-slate-900/80 px-6 py-4 flex items-center justify-between premium-shadow">
             <div className="flex items-center space-x-2">
-              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg"><Wallet size={16} className="text-white" /></div>
+              <div className="w-8 h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center shadow-lg">
+                 <span className="font-bold text-lg">$</span>
+              </div>
               <h1 className="text-lg font-black tracking-tighter">LUXE</h1>
             </div>
             <div className="flex items-center space-x-3">
@@ -991,19 +1151,18 @@ const App: React.FC = () => {
               <div className="space-y-6 animate-in fade-in duration-500">
                 {/* Balance Card */}
                 <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-[2.5rem] p-8 text-white premium-shadow relative overflow-hidden group">
-                  <div className="absolute top-[-20%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl group-hover:bg-indigo-500/30 transition-all"></div>
-                  <div className="flex justify-between items-start mb-6">
+                  <div className="absolute top-[-20%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl group-hover:bg-indigo-500/30 transition-all pointer-events-none"></div>
+                  <div className="flex justify-between items-start mb-6 relative z-10">
                     <p className="text-indigo-200 text-[10px] font-black uppercase tracking-[0.2em] opacity-60">
                       {settings.enableRollover ? 'Net Financial Position' : 'Monthly Cashflow'}
                     </p>
-                    <button onClick={handleTogglePrivacy} className="p-1.5 bg-white/10 rounded-full hover:bg-white/20 transition-all">
+                    <button onClick={handleTogglePrivacy} className="p-1.5 bg-white/10 rounded-full hover:bg-white/20 transition-all relative z-20">
                       {hideBalances ? <EyeOff size={14} /> : <Eye size={14} />}
                     </button>
                   </div>
-                  <h2 className="text-5xl font-black tracking-tighter transition-all mb-4">
+                  <h2 className="text-5xl font-black tracking-tighter transition-all mb-4 relative z-10">
                     {formatPrice(settings.enableRollover ? totalHistoricalBalance : (periodStats.income - periodStats.expense))}
                   </h2>
-                  {/* Removed Inflow/Outflow section as requested */}
                 </div>
 
                 {/* Magic Entry Bar */}
@@ -1039,54 +1198,29 @@ const App: React.FC = () => {
                       <span>OPTIMAL</span>
                     </div>
                   </div>
-                  <div className="flex items-end justify-between h-20 px-2">
-                    {dailyActivity.map((val, i) => {
-                      const max = Math.max(...dailyActivity, 1);
-                      const height = (val / max) * 100;
+                  <div className="flex items-end justify-between h-24 px-2">
+                    {dailyActivity.map((day, i) => {
+                      const max = Math.max(...dailyActivity.map(d => d.amount), 1);
+                      const height = (day.amount / max) * 100;
                       return (
-                        <div key={i} className="flex flex-col items-center group w-full">
-                          <div 
-                            className="w-2 bg-indigo-500/10 dark:bg-indigo-500/20 rounded-full h-16 relative overflow-hidden"
-                          >
+                        <div key={i} className="flex flex-col items-center group w-full space-y-2">
+                          <div className="w-full flex justify-center h-16 items-end">
                             <div 
-                              className="absolute bottom-0 left-0 right-0 bg-indigo-600 rounded-full transition-all duration-1000" 
-                              style={{ height: `${height}%` }}
-                            ></div>
+                              className="w-2.5 bg-indigo-50 dark:bg-indigo-900/20 rounded-full h-full relative overflow-hidden"
+                            >
+                              <div 
+                                className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-indigo-600 to-indigo-400 rounded-full transition-all duration-1000" 
+                                style={{ height: `${height}%` }}
+                              ></div>
+                            </div>
                           </div>
+                          <span className={`text-[9px] font-bold uppercase ${day.dayName === DAYS_SHORT[new Date().getDay()] ? 'text-indigo-600' : 'text-slate-300'}`}>
+                            {day.dayName.charAt(0)}
+                          </span>
                         </div>
                       );
                     })}
                   </div>
-                </div>
-
-                {/* Recently Added */}
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center px-1">
-                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Live Activity</h3>
-                  </div>
-                  {recentTransactions.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-12 bg-white dark:bg-slate-900 rounded-[2rem] border border-dashed border-slate-200 dark:border-slate-700">
-                      <Clock className="text-slate-300 dark:text-slate-700 mb-2" size={32} />
-                      <p className="text-[11px] text-slate-400 italic">Financial logs are empty for today.</p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 gap-2">
-                      {recentTransactions.slice(0, 5).map(t => (
-                        <div key={t.id} onClick={() => handleEditClick(t)} className="bg-white dark:bg-slate-900 p-4 rounded-3xl flex items-center justify-between premium-shadow border border-slate-50 dark:border-slate-800 active:scale-95 transition-all cursor-pointer group">
-                          <div className="flex items-center space-x-3">
-                            <span className="text-xl">{(t.type === 'income' ? incomeCategories : expenseCategories).find(c => c.name === t.category)?.icon || '💸'}</span>
-                            <div>
-                              <p className="font-bold text-[11px]">{t.category}</p>
-                              <p className="text-[9px] text-slate-400 font-bold uppercase">{new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
-                            </div>
-                          </div>
-                          <p className={`font-black text-[12px] ${t.type === 'income' ? 'text-emerald-500' : 'text-rose-500'}`}>
-                            {t.type === 'income' ? '+' : '-'}{formatPrice(t.amount)}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
                 {/* AI Insights Card */}
@@ -1095,7 +1229,7 @@ const App: React.FC = () => {
                     <div className="absolute -right-8 -bottom-8 w-24 h-24 bg-white/10 rounded-full blur-2xl group-hover:scale-150 transition-transform"></div>
                     <div className="flex items-center space-x-2 mb-3">
                         <Sparkles size={16} className="text-indigo-200" />
-                        <h3 className="text-[11px] font-black uppercase tracking-widest">PLATINUM INSIGHTS</h3>
+                        <h3 className="text-[11px] font-black uppercase tracking-widest">AI INSIGHTS</h3>
                     </div>
                     <p className={`text-[13px] leading-relaxed font-medium ${loadingInsights ? 'opacity-50 animate-pulse' : 'opacity-100'}`}>"{insights}"</p>
                   </div>
@@ -1135,23 +1269,15 @@ const App: React.FC = () => {
                                 <div className="h-[1px] flex-1 bg-slate-100 dark:bg-slate-800"></div>
                               </div>
                             )}
-                            <div onClick={() => handleEditClick(t)} className="bg-white dark:bg-slate-900 p-5 rounded-[2rem] flex items-center justify-between premium-shadow border border-slate-50 dark:border-slate-800 active:scale-95 transition-transform cursor-pointer">
-                              <div className="flex items-center space-x-4">
-                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-xl ${t.type === 'income' ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600' : 'bg-rose-50 dark:bg-rose-950/30 text-rose-600'}`}>
-                                  {cat?.icon || '📦'}
-                                </div>
-                                <div>
-                                  <p className="font-bold text-sm">{t.category}</p>
-                                  <div className="flex items-center text-[10px] text-slate-400 font-bold space-x-2">
-                                    <span className="flex items-center"><Clock size={10} className="mr-1" /> {new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                    <span className="italic truncate max-w-[120px]">{t.note || 'No description'}</span>
-                                  </div>
-                                </div>
-                              </div>
-                              <p className={`font-black text-md ${t.type === 'income' ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                {t.type === 'income' ? '+' : '-'}{formatPrice(t.amount)}
-                              </p>
-                            </div>
+                            {/* Swipeable Item */}
+                            <SwipeableTransactionItem 
+                              t={t}
+                              category={cat}
+                              currencySymbol={currency.symbol}
+                              hideBalances={hideBalances}
+                              onEdit={handleEditClick}
+                              onDelete={handleDeleteRequest}
+                            />
                           </div>
                         );
                       })}
@@ -1160,7 +1286,8 @@ const App: React.FC = () => {
                 </div>
               </div>
             )}
-
+            
+            {/* Rest of the Tabs remain unchanged from original logic... */}
             {/* Tab: Stats */}
             {activeTab === 'stats' && (
               <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
@@ -1342,7 +1469,7 @@ const App: React.FC = () => {
         </>
       )}
 
-      {/* Settings Panel */}
+      {/* Settings Modal code remains unchanged ... */}
       {showSettings && (
         <div className="fixed inset-0 z-[60] flex justify-center bg-slate-50 dark:bg-slate-950">
           <div className="w-full max-w-lg h-full overflow-y-auto no-scrollbar animate-in slide-in-from-bottom duration-300">
@@ -1561,9 +1688,8 @@ const App: React.FC = () => {
         </div>
       )}
       
-      {/* ... (Rest of the modals remain unchanged) ... */}
-      {/* Auth Modal */}
-      {showAuthModal && (
+      {/* Auth Modal code remains unchanged ... */}
+       {showAuthModal && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
            <div className="bg-white dark:bg-slate-950 w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl relative border border-white/20">
                <button onClick={() => { if (!verificationRequired) setShowAuthModal(false); }} className={`absolute top-6 right-6 p-2 rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${verificationRequired ? 'hidden' : ''}`}><X size={24} /></button>
@@ -1682,66 +1808,60 @@ const App: React.FC = () => {
             ) : (
               <>
                 <div className="flex justify-between items-center">
-                  <h2 className="text-xl font-black tracking-tight">{editingTransactionId ? 'Modify Record' : 'New Entry'}</h2>
+                  <h2 className="text-xl font-black tracking-tight">{editingTransactionId ? (showDeleteConfirm ? 'Delete Record?' : 'Modify Record') : 'New Entry'}</h2>
                   <div className="flex items-center space-x-2">
-                    {editingTransactionId && (
-                      showDeleteConfirm ? (
-                         <div className="flex items-center space-x-2 mr-2 animate-in slide-in-from-right-4 fade-in">
-                            <span className="text-[10px] text-rose-500 font-bold uppercase">Sure?</span>
-                            <button 
-                              onClick={handleDeleteTransaction} 
-                              className="p-2 bg-rose-500 rounded-full text-white hover:bg-rose-600 transition-colors shadow-lg"
-                            >
-                              <CheckCircle2 size={16} />
-                            </button>
-                            <button 
-                              onClick={() => setShowDeleteConfirm(false)} 
-                              className="p-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-400"
-                            >
-                               <X size={16} />
-                            </button>
-                         </div>
-                      ) : (
-                        <button onClick={() => setShowDeleteConfirm(true)} className="p-2 bg-rose-50 dark:bg-rose-900/30 rounded-full text-rose-500 hover:bg-rose-100 transition-colors">
-                          <Trash2 size={20} />
-                        </button>
-                      )
-                    )}
-                    {!showDeleteConfirm && (
-                      <button onClick={() => { setShowAddModal(false); resetForm(); }} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400">
-                        <X size={20}/>
-                      </button>
-                    )}
+                    {/* Simplified Header - Confirmation logic is handled by main container now for swipe, but kept here for modal */}
+                    <button onClick={() => { setShowAddModal(false); resetForm(); }} className="p-2 bg-slate-50 dark:bg-slate-800 rounded-full text-slate-400">
+                      <X size={20}/>
+                    </button>
                   </div>
                 </div>
                 
-                <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl">
-                  <button onClick={() => setNewType('expense')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'expense' ? 'bg-white dark:bg-slate-700 text-rose-600 dark:text-rose-400 shadow-sm' : 'text-slate-400'}`}>Expense</button>
-                  <button onClick={() => setNewType('income')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'income' ? 'bg-white dark:bg-slate-700 text-emerald-600 dark:text-emerald-400 shadow-sm' : 'text-slate-400'}`}>Income</button>
-                </div>
+                {showDeleteConfirm ? (
+                   <div className="space-y-6 text-center py-4">
+                      <div className="w-20 h-20 bg-rose-100 dark:bg-rose-900/30 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-2 animate-bounce">
+                          <Trash2 size={32} />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-black text-slate-800 dark:text-white">Are you sure?</h3>
+                        <p className="text-sm text-slate-500 dark:text-slate-400">This action cannot be undone.</p>
+                      </div>
+                      <div className="flex gap-3">
+                          <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 py-4 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                          <button onClick={handleDeleteTransaction} className="flex-1 py-4 bg-rose-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg">Yes, Delete</button>
+                      </div>
+                   </div>
+                ) : (
+                  <>
+                    <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl">
+                      <button onClick={() => setNewType('expense')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'expense' ? 'bg-white dark:bg-slate-700 text-rose-600 dark:text-rose-400 shadow-sm' : 'text-slate-400'}`}>Expense</button>
+                      <button onClick={() => setNewType('income')} className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${newType === 'income' ? 'bg-white dark:bg-slate-700 text-emerald-600 dark:text-emerald-400 shadow-sm' : 'text-slate-400'}`}>Income</button>
+                    </div>
 
-                <div className="relative">
-                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-black text-2xl">{currency.symbol}</span>
-                  <input type="number" placeholder="0" value={newAmount} onChange={(e) => setNewAmount(e.target.value)} className="w-full pl-12 pr-4 py-5 bg-slate-50 dark:bg-slate-800 rounded-3xl border-none focus:ring-2 focus:ring-indigo-500 text-5xl font-black text-slate-800 dark:text-white" autoFocus />
-                </div>
+                    <div className="relative">
+                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-black text-2xl">{currency.symbol}</span>
+                      <input type="number" placeholder="0" value={newAmount} onChange={(e) => setNewAmount(e.target.value)} className="w-full pl-12 pr-4 py-5 bg-slate-50 dark:bg-slate-800 rounded-3xl border-none focus:ring-2 focus:ring-indigo-500 text-5xl font-black text-slate-800 dark:text-white" autoFocus />
+                    </div>
 
-                <div className="grid grid-cols-3 gap-2 overflow-y-auto max-h-40 no-scrollbar py-2">
-                  {(newType === 'income' ? incomeCategories : expenseCategories).map(cat => (
-                    <button key={cat.id} onClick={() => setNewCategory(cat.name)} className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${newCategory === cat.name ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300' : 'border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-400'}`}>
-                      <span className="text-2xl mb-1">{cat.icon}</span>
-                      <span className="text-[10px] font-black uppercase truncate w-full text-center">{cat.name}</span>
+                    <div className="grid grid-cols-3 gap-2 overflow-y-auto max-h-40 no-scrollbar py-2">
+                      {(newType === 'income' ? incomeCategories : expenseCategories).map(cat => (
+                        <button key={cat.id} onClick={() => setNewCategory(cat.name)} className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${newCategory === cat.name ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300' : 'border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-400'}`}>
+                          <span className="text-2xl mb-1">{cat.icon}</span>
+                          <span className="text-[10px] font-black uppercase truncate w-full text-center">{cat.name}</span>
+                        </button>
+                      ))}
+                      <button onClick={() => setIsCreatingCategory(true)} className="flex flex-col items-center justify-center p-3 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all">
+                        <Plus size={24} className="mb-1" />
+                        <span className="text-[10px] font-black uppercase truncate w-full text-center">Add New</span>
+                      </button>
+                    </div>
+
+                    <input type="text" placeholder="Memo..." value={newNote} onChange={(e) => setNewNote(e.target.value)} className="w-full px-6 py-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border-none text-sm font-medium text-slate-600 dark:text-slate-300" />
+                    <button onClick={handleSaveTransaction} disabled={!newAmount || !newCategory} className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black text-lg shadow-2xl active:scale-95 disabled:opacity-50 uppercase tracking-widest">
+                      {editingTransactionId ? 'SYNC CHANGES' : 'POST ENTRY'}
                     </button>
-                  ))}
-                  <button onClick={() => setIsCreatingCategory(true)} className="flex flex-col items-center justify-center p-3 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all">
-                    <Plus size={24} className="mb-1" />
-                    <span className="text-[10px] font-black uppercase truncate w-full text-center">Add New</span>
-                  </button>
-                </div>
-
-                <input type="text" placeholder="Memo..." value={newNote} onChange={(e) => setNewNote(e.target.value)} className="w-full px-6 py-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border-none text-sm font-medium text-slate-600 dark:text-slate-300" />
-                <button onClick={handleSaveTransaction} disabled={!newAmount || !newCategory} className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black text-lg shadow-2xl active:scale-95 disabled:opacity-50 uppercase tracking-widest">
-                  {editingTransactionId ? 'SYNC CHANGES' : 'POST ENTRY'}
-                </button>
+                  </>
+                )}
               </>
             )}
           </div>
