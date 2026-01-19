@@ -37,7 +37,9 @@ import {
   Mail,
   Chrome,
   LogIn,
-  Trash2
+  Trash2,
+  Bell,
+  BellOff
 } from 'lucide-react';
 import { 
   Transaction, 
@@ -103,6 +105,7 @@ const App: React.FC = () => {
       monthStartDay: 1,
       enableRollover: true,
       stealthMode: false,
+      dailyReminders: false, // Default false
       apiKey: ''
     };
   });
@@ -140,7 +143,7 @@ const App: React.FC = () => {
   // --- Firebase Auth State ---
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'reset'>('signin');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
@@ -181,6 +184,12 @@ const App: React.FC = () => {
   const [editingBudgetCategory, setEditingBudgetCategory] = useState<string | null>(null);
   const [editingBudgetLimit, setEditingBudgetLimit] = useState('');
 
+  // Daily Reminder State
+  const [showDailyReminderBanner, setShowDailyReminderBanner] = useState(false);
+  
+  // Clear Data State
+  const [confirmClearData, setConfirmClearData] = useState(false);
+
   // Migration State
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -192,6 +201,84 @@ const App: React.FC = () => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 4000);
   }, []);
+
+  // --- DAILY REMINDER LOGIC ---
+  const checkDailyStatus = useCallback(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const hasEntryToday = transactions.some(t => t.date === todayStr);
+    return hasEntryToday;
+  }, [transactions]);
+
+  // Check on Mount/App Open
+  useEffect(() => {
+    if (isOnboarded) {
+      const hasEntry = checkDailyStatus();
+      if (!hasEntry) {
+        // Show banner if no entry
+        setShowDailyReminderBanner(true);
+      } else {
+        setShowDailyReminderBanner(false);
+      }
+    }
+  }, [isOnboarded, transactions, checkDailyStatus]);
+
+  // Check Periodically for Notification
+  useEffect(() => {
+    if (!settings.dailyReminders || !isOnboarded) return;
+
+    const interval = setInterval(() => {
+      const now = new Date();
+      // Trigger notification if it's past 8 PM and no entry
+      if (now.getHours() >= 20 && !checkDailyStatus()) {
+        if (Notification.permission === 'granted') {
+          new Notification("Luxe Ledger", {
+            body: "Have you entered today's expenses?",
+            icon: "/manifest-icon-192.maskable.png", // Assuming path
+            badge: "/manifest-icon-192.maskable.png"
+          });
+        }
+      }
+    }, 1000 * 60 * 60); // Check every hour
+
+    return () => clearInterval(interval);
+  }, [settings.dailyReminders, isOnboarded, checkDailyStatus]);
+
+  const requestNotificationAccess = async () => {
+    if (!('Notification' in window)) {
+      addNotification("Notifications not supported on this device", "error");
+      return;
+    }
+    
+    // Check if previously denied
+    if (Notification.permission === 'denied') {
+      addNotification("Enable notifications in browser settings.", "error");
+      return;
+    }
+
+    // Check if already granted
+    if (Notification.permission === 'granted') {
+      setSettings(prev => ({...prev, dailyReminders: true}));
+      addNotification("Daily reminders enabled", "success");
+      return;
+    }
+
+    // Request permission
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission === 'granted') {
+        setSettings(prev => ({...prev, dailyReminders: true}));
+        addNotification("Daily reminders enabled", "success");
+        new Notification("Luxe Ledger", { body: "You're all set! We'll remind you to track expenses." });
+      } else {
+        setSettings(prev => ({...prev, dailyReminders: false}));
+        addNotification("Permission denied", "error");
+      }
+    } catch (e) {
+      console.error("Notification permission error:", e);
+      addNotification("Could not enable notifications", "error");
+    }
+  };
+
 
   // --- Effects ---
   useEffect(() => {
@@ -357,6 +444,25 @@ const App: React.FC = () => {
       }
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  const handlePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail) {
+        setAuthError('Please enter your email address');
+        return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+        await auth.sendPasswordResetEmail(authEmail);
+        addNotification('Reset link sent to your email', 'success');
+        setAuthMode('signin');
+    } catch (error: any) {
+        setAuthError(error.message);
+    } finally {
+        setAuthLoading(false);
     }
   };
 
@@ -642,6 +748,23 @@ const App: React.FC = () => {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const handleClearAllData = () => {
+    setTransactions([]);
+    setBudgets([]);
+    
+    // Also clear from Firestore if connected
+    if (firebaseUser) {
+        db.collection("users").doc(firebaseUser.uid).set({
+           transactions: [],
+           budgets: [],
+           lastUpdated: Date.now()
+        }, { merge: true }).catch(err => console.error(err));
+    }
+    
+    addNotification("All logs have been cleared.", "success");
+    setConfirmClearData(false);
+  };
+
   const checkBudgetAlert = (categoryName: string, amountToAdd: number) => {
     const budget = budgets.find(b => b.categoryName === categoryName);
     if (!budget || budget.limit <= 0) return;
@@ -660,6 +783,13 @@ const App: React.FC = () => {
     // For simplicity, we just warn if (spent + new) > limit
     if (currentSpent + amountToAdd > budget.limit) {
       addNotification(`Alert: ${categoryName} budget exceeded!`, "error");
+      // Trigger Notification if enabled
+      if (settings.dailyReminders && Notification.permission === 'granted') {
+          new Notification("Luxe Ledger Alert", {
+              body: `You've exceeded your budget for ${categoryName}!`,
+              icon: "/manifest-icon-192.maskable.png"
+          });
+      }
     }
   };
 
@@ -761,6 +891,7 @@ const App: React.FC = () => {
       const res = await getFinancialInsights(
         transactions, 
         MONTHS[currentDate.getMonth()],
+        currency.symbol, // Pass current currency symbol
         settings.apiKey
       );
       setInsights(res);
@@ -768,7 +899,7 @@ const App: React.FC = () => {
     };
     const timer = setTimeout(fetchInsights, 2000);
     return () => clearTimeout(timer);
-  }, [transactions.length, isAiAuthorized, isOnboarded, settings.apiKey]);
+  }, [transactions.length, isAiAuthorized, isOnboarded, settings.apiKey, currency.symbol]);
 
   const getBudgetProgress = (catName: string) => {
     const limit = budgets.find(b => b.categoryName === catName)?.limit || 0;
@@ -783,7 +914,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className={`min-h-screen flex flex-col max-w-lg mx-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors relative overflow-x-hidden ${settings.theme}`}>
+    <div className={`h-[100dvh] w-full flex flex-col max-w-lg mx-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors relative overflow-hidden ${settings.theme}`}>
       {/* Toast Notifications */}
       <div className="fixed top-4 right-4 z-[70] flex flex-col items-end space-y-2 pointer-events-none px-4">
         {notifications.map(n => (
@@ -804,16 +935,18 @@ const App: React.FC = () => {
       </div>
 
       {!isOnboarded ? (
-        <OnboardingFlow 
-          onComplete={() => setIsOnboarded(true)} 
-          currency={currency} 
-          setCurrency={setCurrency}
-          onOpenAuth={(mode) => { setAuthMode(mode); setShowAuthModal(true); }}
-        />
+        <div className="h-full overflow-y-auto no-scrollbar">
+           <OnboardingFlow 
+            onComplete={() => setIsOnboarded(true)} 
+            currency={currency} 
+            setCurrency={setCurrency}
+            onOpenAuth={(mode) => { setAuthMode(mode); setShowAuthModal(true); }}
+          />
+        </div>
       ) : (
         <>
-          {/* Header */}
-          <header className="sticky top-0 z-20 glass dark:bg-slate-900/80 px-6 py-4 flex items-center justify-between premium-shadow">
+          {/* Header - Static Block */}
+          <header className="flex-none z-20 glass dark:bg-slate-900/80 px-6 py-4 flex items-center justify-between premium-shadow">
             <div className="flex items-center space-x-2">
               <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg"><Wallet size={16} className="text-white" /></div>
               <h1 className="text-lg font-black tracking-tighter">LUXE</h1>
@@ -830,13 +963,36 @@ const App: React.FC = () => {
             </div>
           </header>
 
-          <main className="px-6 pt-6 space-y-6 flex-1 overflow-y-auto no-scrollbar pb-24">
+          {/* Main - Scrollable Area */}
+          <main className="flex-1 overflow-y-auto no-scrollbar px-6 pt-6 pb-28 space-y-6 scroll-smooth overscroll-none">
+            
+            {/* Daily Reminder Banner */}
+            {showDailyReminderBanner && (
+              <div className="bg-indigo-600 text-white p-4 rounded-3xl premium-shadow flex items-center justify-between animate-in slide-in-from-top-4">
+                <div className="flex items-center space-x-3">
+                  <div className="bg-white/20 p-2 rounded-xl">
+                    <Bell size={20} className="text-white" />
+                  </div>
+                  <div>
+                    <p className="font-bold text-sm">Missed something?</p>
+                    <p className="text-[10px] opacity-80">You haven't logged any expenses for today.</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => { setShowAddModal(true); }}
+                  className="px-4 py-2 bg-white text-indigo-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-colors"
+                >
+                  Add Now
+                </button>
+              </div>
+            )}
+
             {activeTab === 'home' && (
-              <div className="space-y-6 animate-in fade-in duration-500 pb-12">
+              <div className="space-y-6 animate-in fade-in duration-500">
                 {/* Balance Card */}
                 <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-[2.5rem] p-8 text-white premium-shadow relative overflow-hidden group">
                   <div className="absolute top-[-20%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl group-hover:bg-indigo-500/30 transition-all"></div>
-                  <div className="flex justify-between items-start mb-2">
+                  <div className="flex justify-between items-start mb-6">
                     <p className="text-indigo-200 text-[10px] font-black uppercase tracking-[0.2em] opacity-60">
                       {settings.enableRollover ? 'Net Financial Position' : 'Monthly Cashflow'}
                     </p>
@@ -844,21 +1000,10 @@ const App: React.FC = () => {
                       {hideBalances ? <EyeOff size={14} /> : <Eye size={14} />}
                     </button>
                   </div>
-                  <h2 className="text-5xl font-black tracking-tighter transition-all">
+                  <h2 className="text-5xl font-black tracking-tighter transition-all mb-4">
                     {formatPrice(settings.enableRollover ? totalHistoricalBalance : (periodStats.income - periodStats.expense))}
                   </h2>
-                  <div className="flex mt-8 space-x-3">
-                    <div className="flex-1 bg-white/5 backdrop-blur-md rounded-2xl p-4 border border-white/10">
-                      <TrendingUp size={14} className="text-emerald-400 mb-1" />
-                      <p className="text-[9px] text-white/40 font-black uppercase tracking-widest">Inflow</p>
-                      <p className="text-md font-bold">{formatPrice(periodStats.income)}</p>
-                    </div>
-                    <div className="flex-1 bg-white/5 backdrop-blur-md rounded-2xl p-4 border border-white/10">
-                      <TrendingDown size={14} className="text-rose-400 mb-1" />
-                      <p className="text-[9px] text-white/40 font-black uppercase tracking-widest">Outflow</p>
-                      <p className="text-md font-bold">{formatPrice(periodStats.expense)}</p>
-                    </div>
-                  </div>
+                  {/* Removed Inflow/Outflow section as requested */}
                 </div>
 
                 {/* Magic Entry Bar */}
@@ -960,7 +1105,7 @@ const App: React.FC = () => {
 
             {/* Tab: Journal */}
             {activeTab === 'journal' && (
-              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
                 <div className="flex flex-col space-y-4">
                   <h3 className="text-2xl font-black tracking-tight px-1">Ledger Journal</h3>
                   <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
@@ -1018,7 +1163,7 @@ const App: React.FC = () => {
 
             {/* Tab: Stats */}
             {activeTab === 'stats' && (
-              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
                 <div className="flex flex-col space-y-4">
                   <h3 className="text-2xl font-black tracking-tight px-1 text-center">Inflow vs Outflow</h3>
                   <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-2xl overflow-hidden">
@@ -1065,17 +1210,17 @@ const App: React.FC = () => {
                 {/* New Bar Chart for Trends */}
                 <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
                    <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Trend Analysis</h4>
-                   <PremiumBarChart transactions={statsTransactions} period={statsPeriod} currencySymbol={currency.symbol} />
+                   <PremiumBarChart transactions={statsTransactions} period={statsPeriod} currencySymbol={currency.symbol} hideBalances={hideBalances} />
                 </div>
 
                 <div className="space-y-6">
                   <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
                     <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Expenses</h4>
-                    <PremiumChart transactions={statsTransactions} type="expense" currencySymbol={currency.symbol} />
+                    <PremiumChart transactions={statsTransactions} type="expense" currencySymbol={currency.symbol} hideBalances={hideBalances} />
                   </div>
                   <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] p-7 premium-shadow border border-slate-50 dark:border-slate-800">
                     <h4 className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Distribution: Inflow</h4>
-                    <PremiumChart transactions={statsTransactions} type="income" currencySymbol={currency.symbol} />
+                    <PremiumChart transactions={statsTransactions} type="income" currencySymbol={currency.symbol} hideBalances={hideBalances} />
                   </div>
                 </div>
               </div>
@@ -1083,7 +1228,7 @@ const App: React.FC = () => {
 
             {/* Tab: Limits */}
             {activeTab === 'limits' && (
-              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300 pb-12">
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
                   <div className="flex flex-col space-y-4">
                     <h3 className="text-2xl font-black tracking-tight px-1 text-center">Budget Limits</h3>
                     <p className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
@@ -1165,15 +1310,15 @@ const App: React.FC = () => {
             )}
           </main>
 
-          {/* Floating Action Button */}
-          <div className="fixed bottom-24 left-0 right-0 flex justify-center z-30 pointer-events-none">
+          {/* Floating Action Button - Positioned absolutely within the container */}
+          <div className="absolute bottom-24 left-0 right-0 flex justify-center z-30 pointer-events-none">
             <button onClick={() => { resetForm(); setShowAddModal(true); }} className="pointer-events-auto bg-slate-900 dark:bg-indigo-600 text-white w-16 h-16 rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all border-4 border-slate-50 dark:border-slate-950">
               <Plus size={32} />
             </button>
           </div>
 
-          {/* Navigation */}
-          <nav className="fixed bottom-0 left-0 right-0 glass dark:bg-slate-900/90 border-t border-slate-200 dark:border-slate-800 z-40 px-6 py-4">
+          {/* Navigation - Fixed at bottom of container */}
+          <nav className="flex-none glass dark:bg-slate-900/90 border-t border-slate-200 dark:border-slate-800 z-40 px-6 py-4">
             <div className="max-w-lg mx-auto flex justify-between items-center">
               <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center space-y-1 transition-all ${activeTab === 'home' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
                 <LayoutDashboard size={22} strokeWidth={activeTab === 'home' ? 2.5 : 2} />
@@ -1353,6 +1498,47 @@ const App: React.FC = () => {
                         <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${settings.enableRollover ? 'left-7' : 'left-1'}`}></div>
                       </button>
                     </div>
+                    
+                    {/* New Daily Reminder Toggle */}
+                    <div className="flex items-center justify-between p-4">
+                      <div className="flex items-center space-x-3">
+                        <div className="p-2 bg-rose-50 dark:bg-rose-950/30 text-rose-600 rounded-xl">
+                          {settings.dailyReminders ? <Bell size={18} /> : <BellOff size={18} />}
+                        </div>
+                        <span className="font-bold text-sm">Daily Reminders</span>
+                      </div>
+                      <button onClick={() => { if(!settings.dailyReminders) requestNotificationAccess(); else setSettings({...settings, dailyReminders: false}); }} className={`w-12 h-6 rounded-full transition-all relative ${settings.dailyReminders ? 'bg-indigo-600' : 'bg-slate-200'}`}>
+                        <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${settings.dailyReminders ? 'left-7' : 'left-1'}`}></div>
+                      </button>
+                    </div>
+
+                 </div>
+              </section>
+
+              {/* Danger Zone: Clear Data */}
+              <section className="space-y-4">
+                 <div className="flex items-center space-x-2 text-rose-500 mb-2">
+                   <AlertCircle size={16} />
+                   <h3 className="text-[10px] font-black uppercase tracking-widest">Danger Zone</h3>
+                 </div>
+                 <div className="bg-rose-50 dark:bg-rose-950/20 p-6 rounded-[2.5rem] shadow-sm border border-rose-100 dark:border-rose-900/50">
+                    <div className="text-center space-y-4">
+                       <p className="text-xs font-bold text-rose-600 dark:text-rose-400">Permanently delete all transaction history.</p>
+                       <button 
+                         onClick={() => {
+                            if (confirmClearData) {
+                                handleClearAllData();
+                            } else {
+                                setConfirmClearData(true);
+                                setTimeout(() => setConfirmClearData(false), 3000); // Reset after 3s
+                            }
+                         }}
+                         className={`w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center space-x-2 active:scale-95 transition-all ${confirmClearData ? 'bg-rose-600 text-white animate-pulse' : 'bg-white dark:bg-slate-900 text-rose-500 border border-rose-200 dark:border-rose-800'}`}
+                       >
+                         <Trash2 size={16} />
+                         <span>{confirmClearData ? 'Are you sure?' : 'Clear All Logs'}</span>
+                       </button>
+                    </div>
                  </div>
               </section>
 
@@ -1374,7 +1560,8 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
-
+      
+      {/* ... (Rest of the modals remain unchanged) ... */}
       {/* Auth Modal */}
       {showAuthModal && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
@@ -1390,19 +1577,57 @@ const App: React.FC = () => {
                  </div>
                ) : (
                  <div className="space-y-6">
-                    <div className="text-center mb-8"><h3 className="text-2xl font-black tracking-tight">{authMode === 'signin' ? 'Welcome Back' : 'Join Luxe Ledger'}</h3><p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-2">Secure Cloud Sync</p></div>
-                    <div className="flex gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl">
-                        <button onClick={() => { setAuthMode('signin'); setAuthError(''); }} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signin' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}>Sign In</button>
-                        <button onClick={() => { setAuthMode('signup'); setAuthError(''); }} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signup' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}>Sign Up</button>
+                    <div className="text-center mb-8">
+                      <h3 className="text-2xl font-black tracking-tight">
+                        {authMode === 'signin' ? 'Welcome Back' : authMode === 'signup' ? 'Join Luxe Ledger' : 'Reset Password'}
+                      </h3>
+                      <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-2">
+                        {authMode === 'reset' ? 'We\'ll send you a link' : 'Secure Cloud Sync'}
+                      </p>
                     </div>
+                    
+                    {authMode !== 'reset' && (
+                      <div className="flex gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl">
+                          <button onClick={() => { setAuthMode('signin'); setAuthError(''); }} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signin' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}>Sign In</button>
+                          <button onClick={() => { setAuthMode('signup'); setAuthError(''); }} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl transition-all ${authMode === 'signup' ? 'bg-white dark:bg-slate-800 shadow-sm text-indigo-600' : 'text-slate-400'}`}>Sign Up</button>
+                      </div>
+                    )}
+
                     {authError && <div className="p-4 bg-rose-50 dark:bg-rose-950/30 border border-rose-100 dark:border-rose-900/50 text-rose-600 dark:text-rose-400 rounded-2xl flex items-center gap-3 text-xs font-bold animate-in slide-in-from-top-2"><AlertCircle size={16} /><span>{authError}</span></div>}
-                    <form onSubmit={handleEmailAuth} className="space-y-4">
+                    
+                    <form onSubmit={authMode === 'reset' ? handlePasswordReset : handleEmailAuth} className="space-y-4">
                         <div className="relative group"><Mail className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} /><input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="Email Address" className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all" required /></div>
-                        <div className="relative group"><Lock className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} /><input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Password" className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all" required /></div>
-                        <button type="submit" disabled={authLoading} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">{authLoading ? <Loader2 size={18} className="animate-spin mx-auto" /> : (authMode === 'signin' ? 'Log In' : 'Create Account')}</button>
+                        
+                        {authMode !== 'reset' && (
+                          <div className="relative group">
+                            <Lock className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={18} />
+                            <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Password" className="w-full pl-12 pr-6 py-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border-2 border-transparent focus:border-indigo-500/20 focus:bg-white dark:focus:bg-slate-900 outline-none text-sm font-bold transition-all" required />
+                          </div>
+                        )}
+
+                        {authMode === 'signin' && (
+                          <div className="flex justify-end">
+                            <button type="button" onClick={() => setAuthMode('reset')} className="text-[10px] font-bold text-indigo-500 hover:text-indigo-600 transition-colors">Forgot Password?</button>
+                          </div>
+                        )}
+
+                        <button type="submit" disabled={authLoading} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                          {authLoading ? <Loader2 size={18} className="animate-spin mx-auto" /> : (authMode === 'signin' ? 'Log In' : authMode === 'signup' ? 'Create Account' : 'Send Reset Link')}
+                        </button>
                     </form>
-                    <div className="flex items-center gap-4"><div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div><span className="text-[9px] text-slate-300 font-black uppercase">OR</span><div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div></div>
-                    <button onClick={handleGoogleAuth} disabled={authLoading} className="w-full bg-white dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-800 py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all active:scale-95"><Chrome size={18} className="text-indigo-600" /><span>Continue with Google</span></button>
+
+                    {authMode !== 'reset' && (
+                      <>
+                        <div className="flex items-center gap-4"><div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div><span className="text-[9px] text-slate-300 font-black uppercase">OR</span><div className="h-px bg-slate-100 dark:bg-slate-800 flex-1"></div></div>
+                        <button onClick={handleGoogleAuth} disabled={authLoading} className="w-full bg-white dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-800 py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/80 transition-all active:scale-95"><Chrome size={18} className="text-indigo-600" /><span>Continue with Google</span></button>
+                      </>
+                    )}
+
+                    {authMode === 'reset' && (
+                      <button onClick={() => setAuthMode('signin')} className="w-full py-2 text-slate-400 text-xs font-bold uppercase tracking-widest hover:text-slate-600 dark:hover:text-slate-300 transition-colors">
+                        Back to Log In
+                      </button>
+                    )}
                  </div>
                )}
            </div>

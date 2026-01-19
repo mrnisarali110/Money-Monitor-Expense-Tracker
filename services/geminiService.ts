@@ -2,7 +2,12 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Transaction, TransactionType } from "../types";
 
-export const getFinancialInsights = async (transactions: Transaction[], monthName: string, apiKey?: string) => {
+export const getFinancialInsights = async (
+  transactions: Transaction[], 
+  monthName: string, 
+  currencySymbol: string, 
+  apiKey?: string
+) => {
   if (transactions.length === 0) return "Add some transactions to see smart insights!";
 
   const key = apiKey || process.env.API_KEY;
@@ -22,12 +27,13 @@ export const getFinancialInsights = async (transactions: Transaction[], monthNam
 
   const prompt = `
     Based on the following financial summary for ${monthName}:
-    Total Income: $${summary.income}
-    Total Expenses: $${summary.expense}
+    Total Income: ${currencySymbol}${summary.income}
+    Total Expenses: ${currencySymbol}${summary.expense}
     Transaction Details: ${JSON.stringify(transactions.slice(0, 10).map(t => ({ cat: t.category, amt: t.amount, type: t.type })))}
 
     Provide a concise, premium-style financial insight (max 2 sentences). 
     Focus on savings potential or spending trends. Be encouraging but professional.
+    Always use '${currencySymbol}' as the currency symbol in your response.
   `;
 
   try {

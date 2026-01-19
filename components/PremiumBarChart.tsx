@@ -7,9 +7,10 @@ interface PremiumBarChartProps {
   transactions: Transaction[];
   period: 'day' | 'week' | 'month' | 'year';
   currencySymbol: string;
+  hideBalances?: boolean;
 }
 
-export const PremiumBarChart: React.FC<PremiumBarChartProps> = ({ transactions, period, currencySymbol }) => {
+export const PremiumBarChart: React.FC<PremiumBarChartProps> = ({ transactions, period, currencySymbol, hideBalances = false }) => {
   // Group data based on period
   const data = React.useMemo(() => {
     const grouped: Record<string, { name: string; income: number; expense: number }> = {};
@@ -78,7 +79,10 @@ export const PremiumBarChart: React.FC<PremiumBarChartProps> = ({ transactions, 
               backgroundColor: 'rgba(15, 23, 42, 0.95)',
               color: '#fff'
             }}
-            formatter={(value: number) => [`${currencySymbol}${value.toLocaleString()}`, '']}
+            formatter={(value: number) => [
+              hideBalances ? '••••••' : `${currencySymbol}${value.toLocaleString()}`, 
+              ''
+            ]}
           />
           <Bar dataKey="income" fill="#10b981" radius={[4, 4, 4, 4]} maxBarSize={40} />
           <Bar dataKey="expense" fill="#f43f5e" radius={[4, 4, 4, 4]} maxBarSize={40} />

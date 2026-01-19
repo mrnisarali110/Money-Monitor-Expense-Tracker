@@ -37,5 +37,6 @@ export interface UserSettings {
   monthStartDay: number;
   enableRollover: boolean;
   stealthMode: boolean;
+  dailyReminders: boolean; // New Field
   apiKey?: string;
 }

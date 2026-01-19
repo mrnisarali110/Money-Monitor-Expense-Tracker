@@ -32,7 +32,6 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Cache CDN requests (esm.sh, fonts, etc) aggressively
   if (event.request.url.includes('esm.sh') || event.request.url.includes('googleapis') || event.request.url.includes('cdn.tailwindcss')) {
     event.respondWith(
       caches.open(CACHE_NAME).then((cache) => {
@@ -47,7 +46,6 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-while-revalidate for everything else
   event.respondWith(
     caches.match(event.request).then((response) => {
       const fetchPromise = fetch(event.request).then((networkResponse) => {
@@ -57,6 +55,25 @@ self.addEventListener('fetch', (event) => {
         return networkResponse;
       });
       return response || fetchPromise;
+    })
+  );
+});
+
+// Handle Notification Clicks
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      // If a window is already open, focus it
+      for (const client of clientList) {
+        if (client.url === '/' && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      // Otherwise open a new window
+      if (clients.openWindow) {
+        return clients.openWindow('/');
+      }
     })
   );
 });

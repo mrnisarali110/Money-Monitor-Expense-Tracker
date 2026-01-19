@@ -7,9 +7,10 @@ interface PremiumChartProps {
   transactions: Transaction[];
   type: 'income' | 'expense';
   currencySymbol: string;
+  hideBalances?: boolean;
 }
 
-export const PremiumChart: React.FC<PremiumChartProps> = ({ transactions, type, currencySymbol }) => {
+export const PremiumChart: React.FC<PremiumChartProps> = ({ transactions, type, currencySymbol, hideBalances = false }) => {
   const filtered = transactions.filter(t => t.type === type);
   
   const dataMap = filtered.reduce((acc: any, t) => {
@@ -69,7 +70,7 @@ export const PremiumChart: React.FC<PremiumChartProps> = ({ transactions, type, 
             itemStyle={{ color: '#fff' }}
             separator=": "
             formatter={(value: number, name: string) => [
-              `${currencySymbol} ${value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`, 
+              hideBalances ? '••••••' : `${currencySymbol} ${value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`, 
               name
             ]}
           />

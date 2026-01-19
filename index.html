@@ -1,13 +1,14 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#4f46e5">
     <meta name="description" content="A premium AI-powered expense tracker.">
     <title>Luxe Ledger</title>
     <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" href="https://cdn-icons-png.flaticon.com/512/10508/10508933.png">
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/10508/10508933.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -32,6 +33,7 @@
             user-select: none;
             -webkit-tap-highlight-color: transparent;
             transition: background-color 0.3s ease;
+            overscroll-behavior-y: none; /* Prevent pull-to-refresh on body */
         }
         .dark body {
             background-color: #020617;
@@ -50,11 +52,15 @@
             background: rgba(255, 255, 255, 0.8);
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.3);
         }
         .dark .glass {
             background: rgba(15, 23, 42, 0.8);
-            border-color: rgba(255, 255, 255, 0.05);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        /* Ensure inputs don't zoom on mobile */
+        input, select, textarea {
+            font-size: 16px !important;
         }
     </style>
     <!-- 
